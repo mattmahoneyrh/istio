@@ -168,7 +168,7 @@ if [[ -z "${SKIP_SETUP:-}" ]]; then
 fi
 
 if [[ -z "${SKIP_BUILD:-}" ]]; then
-  trace "setup kind registry" setup_kind_registry
+# MattM  trace "setup kind registry" setup_kind_registry
   trace "build images" build_images "${PARAMS[*]}"
 fi
 
