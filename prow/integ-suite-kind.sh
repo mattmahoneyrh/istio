@@ -172,6 +172,9 @@ if [[ -z "${SKIP_BUILD:-}" ]]; then
   trace "build images" build_images "${PARAMS[*]}"
 fi
 
+# MattM: Force build
+trace "build images" build_images "${PARAMS[*]}"
+
 # If a variant is defined, update the tag accordingly
 if [[ -n "${VARIANT:-}" ]]; then
   export TAG="${TAG}-${VARIANT}"
