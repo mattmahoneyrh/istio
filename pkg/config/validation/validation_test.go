@@ -15,6 +15,7 @@
 package validation
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -414,9 +415,15 @@ func TestValidateMeshConfig(t *testing.T) {
 				},
 			},
 		},
+		MeshMTLS: &meshconfig.MeshConfig_TLSConfig{
+			EcdhCurves: []string{"P-256"},
+		},
+		TlsDefaults: &meshconfig.MeshConfig_TLSConfig{
+			EcdhCurves: []string{"P-256", "P-256", "invalid"},
+		},
 	}
 
-	_, err := ValidateMeshConfig(invalid)
+	warning, err := ValidateMeshConfig(invalid)
 	if err == nil {
 		t.Errorf("expected an error on invalid proxy mesh config: %v", invalid)
 	} else {
@@ -434,6 +441,7 @@ func TestValidateMeshConfig(t *testing.T) {
 			"trustDomainAliases[0]",
 			"trustDomainAliases[1]",
 			"trustDomainAliases[2]",
+			"mesh TLS does not support ECDH curves configuration",
 		}
 		switch err := err.(type) {
 		case *multierror.Error:
@@ -444,6 +452,29 @@ func TestValidateMeshConfig(t *testing.T) {
 				for i := 0; i < len(wantErrors); i++ {
 					if !strings.HasPrefix(err.Errors[i].Error(), wantErrors[i]) {
 						t.Errorf("expected error %q at index %d but found %q", wantErrors[i], i, err.Errors[i])
+					}
+				}
+			}
+		default:
+			t.Errorf("expected a multi error as output")
+		}
+	}
+	if warning == nil {
+		t.Errorf("expected a warning on invalid proxy mesh config: %v", invalid)
+	} else {
+		wantWarnings := []string{
+			"detected unrecognized ECDH curves",
+			"detected duplicate ECDH curves",
+		}
+		switch warn := warning.(type) {
+		case *multierror.Error:
+			// each field must cause an error in the field
+			if len(warn.Errors) != len(wantWarnings) {
+				t.Errorf("expected %d warnings but found %v", len(wantWarnings), warn)
+			} else {
+				for i := 0; i < len(wantWarnings); i++ {
+					if !strings.HasPrefix(warn.Errors[i].Error(), wantWarnings[i]) {
+						t.Errorf("expected warning %q at index %d but found %q", wantWarnings[i], i, warn.Errors[i])
 					}
 				}
 			}
@@ -1443,6 +1474,36 @@ func TestValidateTlsOptions(t *testing.T) {
 			"client CA bundle", "",
 		},
 		{
+			"optional mutual no certs",
+			&networking.ServerTLSSettings{
+				Mode:              networking.ServerTLSSettings_OPTIONAL_MUTUAL,
+				ServerCertificate: "",
+				PrivateKey:        "",
+				CaCertificates:    "",
+			},
+			"server certificate", "",
+		},
+		{
+			"optional mutual no certs",
+			&networking.ServerTLSSettings{
+				Mode:              networking.ServerTLSSettings_OPTIONAL_MUTUAL,
+				ServerCertificate: "",
+				PrivateKey:        "",
+				CaCertificates:    "",
+			},
+			"private key", "",
+		},
+		{
+			"optional mutual no certs",
+			&networking.ServerTLSSettings{
+				Mode:              networking.ServerTLSSettings_OPTIONAL_MUTUAL,
+				ServerCertificate: "",
+				PrivateKey:        "",
+				CaCertificates:    "",
+			},
+			"client CA bundle", "",
+		},
+		{
 			"pass through sds no certs",
 			&networking.ServerTLSSettings{
 				Mode:              networking.ServerTLSSettings_PASSTHROUGH,
@@ -2048,7 +2109,39 @@ func TestValidateHTTPRewrite(t *testing.T) {
 			valid: true,
 		},
 		{
-			name:  "no uri or authority",
+			name: "uriRegexRewrite",
+			in: &networking.HTTPRewrite{
+				UriRegexRewrite: &networking.RegexRewrite{
+					Match:   "^/service/([^/]+)(/.*)$",
+					Rewrite: `\2/instance/\1`,
+				},
+			},
+			valid: true,
+		},
+		{
+			name: "uriRegexRewrite and authority",
+			in: &networking.HTTPRewrite{
+				Authority: "foobar.org",
+				UriRegexRewrite: &networking.RegexRewrite{
+					Match:   "^/service/([^/]+)(/.*)$",
+					Rewrite: `\2/instance/\1`,
+				},
+			},
+			valid: true,
+		},
+		{
+			name: "uriRegexRewrite and uri",
+			in: &networking.HTTPRewrite{
+				Uri: "/path/to/resource",
+				UriRegexRewrite: &networking.RegexRewrite{
+					Match:   "^/service/([^/]+)(/.*)$",
+					Rewrite: `\2/instance/\1`,
+				},
+			},
+			valid: false,
+		},
+		{
+			name:  "no uri, uriRegexRewrite, or authority",
 			in:    &networking.HTTPRewrite{},
 			valid: false,
 		},
@@ -2057,6 +2150,59 @@ func TestValidateHTTPRewrite(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := validateHTTPRewrite(tc.in); (got == nil) != tc.valid {
+				t.Errorf("got valid=%v, want valid=%v: %v",
+					got == nil, tc.valid, got)
+			}
+		})
+	}
+}
+
+func TestValidateUriRegexRewrite(t *testing.T) {
+	testCases := []struct {
+		name  string
+		in    *networking.RegexRewrite
+		valid bool
+	}{
+		{
+			name:  "uriRegexRewrite nil",
+			in:    nil,
+			valid: true,
+		},
+		{
+			name: "uriRegexRewrite happy path",
+			in: &networking.RegexRewrite{
+				Match:   "^/service/([^/]+)(/.*)$",
+				Rewrite: `\2/instance/\1`,
+			},
+			valid: true,
+		},
+		{
+			name: "uriRegexRewrite missing match",
+			in: &networking.RegexRewrite{
+				Rewrite: `\2/instance/\1`,
+			},
+			valid: false,
+		},
+		{
+			name: "uriRegexRewrite missing rewrite",
+			in: &networking.RegexRewrite{
+				Match: "^/service/([^/]+)(/.*)$",
+			},
+			valid: false,
+		},
+		{
+			name: "uriRegexRewrite invalid regex patterns",
+			in: &networking.RegexRewrite{
+				Match:   "[",
+				Rewrite: "[",
+			},
+			valid: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validateURIRegexRewrite(tc.in); (got == nil) != tc.valid {
 				t.Errorf("got valid=%v, want valid=%v: %v",
 					got == nil, tc.valid, got)
 			}
@@ -2826,6 +2972,16 @@ func TestValidateHTTPRoute(t *testing.T) {
 				},
 			}},
 		}, valid: false},
+		{name: "empty prefix header match", route: &networking.HTTPRoute{
+			Route: []*networking.HTTPRouteDestination{{
+				Destination: &networking.Destination{Host: "foo.bar"},
+			}},
+			Match: []*networking.HTTPMatchRequest{{
+				Headers: map[string]*networking.StringMatch{
+					"emptyprefix": {MatchType: &networking.StringMatch_Prefix{Prefix: ""}},
+				},
+			}},
+		}, valid: false},
 		{name: "nil match", route: &networking.HTTPRoute{
 			Route: []*networking.HTTPRouteDestination{{
 				Destination: &networking.Destination{Host: "foo.bar"},
@@ -3272,6 +3428,12 @@ func TestValidateWorkloadEntry(t *testing.T) {
 			valid: false,
 		},
 		{
+			name:    "missing address with network",
+			in:      &networking.WorkloadEntry{Network: "network-2"},
+			valid:   true,
+			warning: true,
+		},
+		{
 			name:  "valid unix endpoint",
 			in:    &networking.WorkloadEntry{Address: "unix:///lon/google/com"},
 			valid: true,
@@ -3465,9 +3627,10 @@ func checkValidationMessage(t *testing.T, gotWarning Warning, gotError error, wa
 
 func TestValidateDestinationRule(t *testing.T) {
 	cases := []struct {
-		name  string
-		in    proto.Message
-		valid bool
+		name    string
+		in      proto.Message
+		valid   bool
+		warning bool
 	}{
 		{name: "simple destination rule", in: &networking.DestinationRule{
 			Host: "reviews",
@@ -3476,6 +3639,15 @@ func TestValidateDestinationRule(t *testing.T) {
 				{Name: "v2", Labels: map[string]string{"version": "v2"}},
 			},
 		}, valid: true},
+
+		{name: "simple destination rule with empty selector labels", in: &networking.DestinationRule{
+			Host: "reviews",
+			Subsets: []*networking.Subset{
+				{Name: "v1", Labels: map[string]string{"version": "v1"}},
+				{Name: "v2", Labels: map[string]string{"version": "v2"}},
+			},
+			WorkloadSelector: &api.WorkloadSelector{},
+		}, valid: true, warning: true},
 
 		{name: "missing destination name", in: &networking.DestinationRule{
 			Host: "",
@@ -3616,18 +3788,225 @@ func TestValidateDestinationRule(t *testing.T) {
 				{Name: "v2", Labels: map[string]string{"version": "v2"}},
 			},
 		}, valid: true},
+
+		{name: "InsecureSkipVerify is not specified with tls mode simple, and the ca cert is specified by CaCertificates", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:            networking.ClientTLSSettings_SIMPLE,
+					CaCertificates:  "test",
+					SubjectAltNames: []string{"reviews.default.svc"},
+				},
+			},
+		}, valid: true},
+
+		{name: "InsecureSkipVerify is not specified with tls mode simple, and the ca cert is specified by CredentialName", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:            networking.ClientTLSSettings_SIMPLE,
+					CredentialName:  "test",
+					SubjectAltNames: []string{"reviews.default.svc"},
+				},
+			},
+		}, valid: true},
+
+		{name: "InsecureSkipVerify is set false with tls mode simple, and the ca cert is specified by CaCertificates", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:            networking.ClientTLSSettings_SIMPLE,
+					CaCertificates:  "test",
+					SubjectAltNames: []string{"reviews.default.svc"},
+					InsecureSkipVerify: &wrapperspb.BoolValue{
+						Value: false,
+					},
+				},
+			},
+		}, valid: true},
+
+		{name: "InsecureSkipVerify is set false with tls mode simple, and the ca cert is specified by CredentialName", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:            networking.ClientTLSSettings_SIMPLE,
+					CredentialName:  "test",
+					SubjectAltNames: []string{"reviews.default.svc"},
+					InsecureSkipVerify: &wrapperspb.BoolValue{
+						Value: false,
+					},
+				},
+			},
+		}, valid: true},
+
+		{name: "InsecureSkipVerify is set true with tls mode simple, and the ca cert is specified by CaCertificates", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:           networking.ClientTLSSettings_SIMPLE,
+					CredentialName: "test",
+					InsecureSkipVerify: &wrapperspb.BoolValue{
+						Value: true,
+					},
+				},
+			},
+		}, valid: false},
+
+		{name: "InsecureSkipVerify is set true with tls mode simple, and the ca cert is specified by CredentialName", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:           networking.ClientTLSSettings_SIMPLE,
+					CaCertificates: "test",
+					InsecureSkipVerify: &wrapperspb.BoolValue{
+						Value: true,
+					},
+				},
+			},
+		}, valid: false},
+
+		{name: "InsecureSkipVerify is set true with tls mode simple, and the san is specified", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:            networking.ClientTLSSettings_SIMPLE,
+					SubjectAltNames: []string{"reviews.default.svc"},
+					InsecureSkipVerify: &wrapperspb.BoolValue{
+						Value: true,
+					},
+				},
+			},
+		}, valid: false},
+
+		{name: "InsecureSkipVerify is not specified with tls mode mutual, and the ca cert is specified by CaCertificates", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:              networking.ClientTLSSettings_MUTUAL,
+					CaCertificates:    "test",
+					PrivateKey:        "key",
+					ClientCertificate: "cert",
+					SubjectAltNames:   []string{"reviews.default.svc"},
+				},
+			},
+		}, valid: true},
+
+		{name: "InsecureSkipVerify is not specified with tls mode mutual, and the ca cert is specified by CredentialName", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:            networking.ClientTLSSettings_MUTUAL,
+					CredentialName:  "test",
+					SubjectAltNames: []string{"reviews.default.svc"},
+				},
+			},
+		}, valid: true},
+
+		{name: "InsecureSkipVerify is set false with tls mode mutual, and the ca cert is specified by CaCertificates", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:              networking.ClientTLSSettings_MUTUAL,
+					CaCertificates:    "test",
+					PrivateKey:        "key",
+					ClientCertificate: "cert",
+					SubjectAltNames:   []string{"reviews.default.svc"},
+					InsecureSkipVerify: &wrapperspb.BoolValue{
+						Value: false,
+					},
+				},
+			},
+		}, valid: true},
+
+		{name: "InsecureSkipVerify is set false with tls mode mutual, and the ca cert is specified by CredentialName", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:            networking.ClientTLSSettings_MUTUAL,
+					CredentialName:  "test",
+					SubjectAltNames: []string{"reviews.default.svc"},
+					InsecureSkipVerify: &wrapperspb.BoolValue{
+						Value: false,
+					},
+				},
+			},
+		}, valid: true},
+
+		{name: "InsecureSkipVerify is set true with tls mode mutual, and the ca cert is specified by CaCertificates", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:              networking.ClientTLSSettings_MUTUAL,
+					CaCertificates:    "test",
+					PrivateKey:        "key",
+					ClientCertificate: "cert",
+					InsecureSkipVerify: &wrapperspb.BoolValue{
+						Value: true,
+					},
+				},
+			},
+		}, valid: false},
+
+		{name: "InsecureSkipVerify is set true with tls mode mutual, and the ca cert is specified by CaCertificates", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:           networking.ClientTLSSettings_MUTUAL,
+					CredentialName: "test",
+					InsecureSkipVerify: &wrapperspb.BoolValue{
+						Value: true,
+					},
+				},
+			},
+		}, valid: true},
+
+		{name: "InsecureSkipVerify is set true with tls mode mutual, and the ca cert is not specified", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:              networking.ClientTLSSettings_MUTUAL,
+					PrivateKey:        "key",
+					ClientCertificate: "cert",
+					InsecureSkipVerify: &wrapperspb.BoolValue{
+						Value: true,
+					},
+				},
+			},
+		}, valid: true},
+
+		{name: "InsecureSkipVerify is set true with tls mode mutual, and the san is specified", in: &networking.DestinationRule{
+			Host: "reviews",
+			TrafficPolicy: &networking.TrafficPolicy{
+				Tls: &networking.ClientTLSSettings{
+					Mode:              networking.ClientTLSSettings_MUTUAL,
+					PrivateKey:        "key",
+					ClientCertificate: "cert",
+					SubjectAltNames:   []string{"reviews.default.svc"},
+					InsecureSkipVerify: &wrapperspb.BoolValue{
+						Value: true,
+					},
+				},
+			},
+		}, valid: false},
 	}
 	for _, c := range cases {
-		if _, got := ValidateDestinationRule(config.Config{
-			Meta: config.Meta{
-				Name:      someName,
-				Namespace: someNamespace,
-			},
-			Spec: c.in,
-		}); (got == nil) != c.valid {
-			t.Errorf("ValidateDestinationRule failed on %v: got valid=%v but wanted valid=%v: %v",
-				c.name, got == nil, c.valid, got)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			warn, got := ValidateDestinationRule(config.Config{
+				Meta: config.Meta{
+					Name:      someName,
+					Namespace: someNamespace,
+				},
+				Spec: c.in,
+			})
+			if (got == nil) != c.valid {
+				t.Errorf("ValidateDestinationRule failed on %v: got valid=%v but wanted valid=%v: %v",
+					c.name, got == nil, c.valid, got)
+			}
+			if (warn == nil) == c.warning {
+				t.Errorf("ValidateDestinationRule failed on %v: got warn=%v but wanted warn=%v: %v",
+					c.name, warn == nil, c.warning, warn)
+			}
+		})
 	}
 }
 
@@ -4355,7 +4734,7 @@ func TestValidateEnvoyFilter(t *testing.T) {
 					},
 				},
 			},
-		}, error: "", warning: "using deprecated type_url"},
+		}, error: "referenced type unknown (hint: try using the v3 XDS API)"},
 		{name: "deprecated type", in: &networking.EnvoyFilter{
 			ConfigPatches: []*networking.EnvoyFilter_EnvoyConfigObjectPatch{
 				{
@@ -5045,6 +5424,19 @@ func TestValidateServiceEntries(t *testing.T) {
 			valid:   true,
 			warning: false,
 		},
+		{
+			name: "partial wildcard hosts", in: &networking.ServiceEntry{
+				Hosts:     []string{"*.nytimes.com", "*washingtonpost.com"},
+				Addresses: []string{},
+				Ports: []*networking.ServicePort{
+					{Number: 443, Protocol: "HTTPS", Name: "https-nytimes"},
+				},
+				Endpoints:  []*networking.WorkloadEntry{},
+				Resolution: networking.ServiceEntry_NONE,
+			},
+			valid:   true,
+			warning: true,
+		},
 	}
 
 	for _, c := range cases {
@@ -5296,6 +5688,14 @@ func TestValidateAuthorizationPolicy(t *testing.T) {
 				},
 			},
 			valid: false,
+		},
+		{
+			name: "selector-empty-labels",
+			in: &security_beta.AuthorizationPolicy{
+				Selector: &api.WorkloadSelector{},
+			},
+			valid:   true,
+			Warning: true,
 		},
 		{
 			name: "selector-wildcard-value",
@@ -6008,9 +6408,10 @@ func TestValidateAuthorizationPolicy(t *testing.T) {
 			Spec: c.in,
 		})
 		if (got == nil) != c.valid {
-			t.Errorf("error: got: %v\nwant: %v", got, c.valid)
-		} else if (war != nil) != c.Warning {
-			t.Errorf("warning: got: %v\nwant: %v", war, c.valid)
+			t.Errorf("test: %q error: got: %v\nwant: %v", c.name, got, c.valid)
+		}
+		if (war != nil) != c.Warning {
+			t.Errorf("test: %q warning: got: %v\nwant: %v", c.name, war, c.valid)
 		}
 	}
 }
@@ -7211,6 +7612,7 @@ func TestValidateRequestAuthentication(t *testing.T) {
 		annotations map[string]string
 		in          proto.Message
 		valid       bool
+		warning     bool
 	}{
 		{
 			name:       "empty spec",
@@ -7224,7 +7626,8 @@ func TestValidateRequestAuthentication(t *testing.T) {
 			in: &security_beta.RequestAuthentication{
 				Selector: &api.WorkloadSelector{},
 			},
-			valid: true,
+			valid:   true,
+			warning: true,
 		},
 		{
 			name:       "empty spec with non default name",
@@ -7502,15 +7905,19 @@ func TestValidateRequestAuthentication(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if _, got := ValidateRequestAuthentication(config.Config{
+			warn, got := ValidateRequestAuthentication(config.Config{
 				Meta: config.Meta{
 					Name:        c.configName,
 					Namespace:   someNamespace,
 					Annotations: c.annotations,
 				},
 				Spec: c.in,
-			}); (got == nil) != c.valid {
-				t.Errorf("got(%v) != want(%v)\n", got, c.valid)
+			})
+			if (got == nil) != c.valid {
+				t.Errorf("test: %q got(%v) != want(%v)\n", c.name, got, c.valid)
+			}
+			if (warn == nil) == c.warning {
+				t.Errorf("test: %q warn(%v) != want(%v)\n", c.name, warn, c.warning)
 			}
 		})
 	}
@@ -7522,6 +7929,7 @@ func TestValidatePeerAuthentication(t *testing.T) {
 		configName string
 		in         proto.Message
 		valid      bool
+		warning    bool
 	}{
 		{
 			name:       "empty spec",
@@ -7530,12 +7938,13 @@ func TestValidatePeerAuthentication(t *testing.T) {
 			valid:      true,
 		},
 		{
-			name:       "empty mtls",
+			name:       "empty mtls with selector of empty labels",
 			configName: constants.DefaultAuthenticationPolicyName,
 			in: &security_beta.PeerAuthentication{
 				Selector: &api.WorkloadSelector{},
 			},
-			valid: true,
+			valid:   true,
+			warning: true,
 		},
 		{
 			name:       "empty spec with non default name",
@@ -7623,14 +8032,18 @@ func TestValidatePeerAuthentication(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if _, got := ValidatePeerAuthentication(config.Config{
+			warn, got := ValidatePeerAuthentication(config.Config{
 				Meta: config.Meta{
 					Name:      c.configName,
 					Namespace: someNamespace,
 				},
 				Spec: c.in,
-			}); (got == nil) != c.valid {
+			})
+			if (got == nil) != c.valid {
 				t.Errorf("got(%v) != want(%v)\n", got, c.valid)
+			}
+			if (warn == nil) == c.warning {
+				t.Errorf("warn(%v) != want(%v)\n", warn, c.warning)
 			}
 		})
 	}
@@ -8006,7 +8419,7 @@ func TestValidateTelemetry(t *testing.T) {
 					},
 				}},
 			},
-			"must be set set when operation is UPSERT", "",
+			"must be set when operation is UPSERT", "",
 		},
 		{
 			"good metrics operation",
@@ -8287,4 +8700,54 @@ func TestRecurseMissingTypedConfig(t *testing.T) {
 	assert.Equal(t, recurseMissingTypedConfig(good.ProtoReflect()), []string{}, "typed config set")
 	assert.Equal(t, recurseMissingTypedConfig(ecds.ProtoReflect()), []string{}, "config discovery set")
 	assert.Equal(t, recurseMissingTypedConfig(bad.ProtoReflect()), []string{wellknown.TCPProxy}, "typed config not set")
+}
+
+func TestValidateHTTPHeaderValue(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected error
+	}{
+		{
+			input:    "foo",
+			expected: nil,
+		},
+		{
+			input:    "%HOSTNAME%",
+			expected: nil,
+		},
+		{
+			input:    "100%%",
+			expected: nil,
+		},
+		{
+			input:    "prefix %HOSTNAME% suffix",
+			expected: nil,
+		},
+		{
+			input:    "%DOWNSTREAM_PEER_CERT_V_END(%b %d %H:%M:%S %Y %Z)%",
+			expected: nil,
+		},
+		{
+			input: "%DYNAMIC_METADATA(com.test.my_filter)%",
+		},
+		{
+			input:    "%START_TIME%%",
+			expected: errors.New("header value configuration %START_TIME%% is invalid"),
+		},
+		{
+			input:    "abc%123",
+			expected: errors.New("header value configuration abc%123 is invalid"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			got := ValidateHTTPHeaderValue(tc.input)
+			if tc.expected == nil {
+				assert.NoError(t, got)
+			} else {
+				assert.Error(t, got)
+			}
+		})
+	}
 }

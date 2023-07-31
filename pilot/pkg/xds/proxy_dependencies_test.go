@@ -67,16 +67,12 @@ func TestProxyNeedsPush(t *testing.T) {
 	for kind, name := range sidecarScopeKindNames {
 		sidecar.SidecarScope.AddConfigDependencies(model.ConfigKey{Kind: kind, Name: name, Namespace: nsName}.HashCode())
 	}
-	for kind, types := range configKindAffectedProxyTypes {
-		for _, nodeType := range types {
-			if nodeType == model.SidecarProxy {
-				sidecar.SidecarScope.AddConfigDependencies(model.ConfigKey{
-					Kind:      kind,
-					Name:      generalName,
-					Namespace: nsName,
-				}.HashCode())
-			}
-		}
+	for kind := range UnAffectedConfigKinds[model.SidecarProxy] {
+		sidecar.SidecarScope.AddConfigDependencies(model.ConfigKey{
+			Kind:      kind,
+			Name:      generalName,
+			Namespace: nsName,
+		}.HashCode())
 	}
 
 	cases := []Case{
@@ -128,7 +124,7 @@ func TestProxyNeedsPush(t *testing.T) {
 	}
 
 	sidecarNamespaceScopeTypes := []kind.Kind{
-		kind.EnvoyFilter, kind.AuthorizationPolicy, kind.RequestAuthentication,
+		kind.EnvoyFilter, kind.AuthorizationPolicy, kind.RequestAuthentication, kind.WasmPlugin,
 	}
 	for _, k := range sidecarNamespaceScopeTypes {
 		cases = append(cases,
@@ -144,33 +140,29 @@ func TestProxyNeedsPush(t *testing.T) {
 				configs: sets.New(model.ConfigKey{Kind: k, Name: generalName, Namespace: "invalid-namespace"}),
 				want:    false,
 			},
+			Case{
+				name:    fmt.Sprintf("%s config in the root namespace", k.String()),
+				proxy:   sidecar,
+				configs: sets.New(model.ConfigKey{Kind: k, Name: generalName, Namespace: nsRoot}),
+				want:    true,
+			},
 		)
 	}
 
 	// tests for kind-affect-proxy.
-	for k, types := range configKindAffectedProxyTypes {
-		for _, nodeType := range model.NodeTypes {
-			affected := false
-			for _, affectedType := range types {
-				if nodeType == affectedType {
-					affected = true
-					break
-				}
-			}
+	for _, nodeType := range []model.NodeType{model.Router, model.SidecarProxy} {
+		proxy := gateway
+		if nodeType == model.SidecarProxy {
+			proxy = sidecar
+		}
+		for k := range UnAffectedConfigKinds[proxy.Type] {
+			cases = append(cases, Case{
+				name:    fmt.Sprintf("kind %s not affect %s", k.String(), nodeType),
+				proxy:   proxy,
+				configs: sets.New(model.ConfigKey{Kind: k, Name: generalName + invalidNameSuffix, Namespace: nsName}),
 
-			if !affected {
-				proxy := gateway
-				if nodeType == model.SidecarProxy {
-					proxy = sidecar
-				}
-				cases = append(cases, Case{
-					name:    fmt.Sprintf("kind %s not affect %s", k.String(), nodeType),
-					proxy:   proxy,
-					configs: sets.New(model.ConfigKey{Kind: k, Name: generalName + invalidNameSuffix, Namespace: nsName}),
-
-					want: false,
-				})
-			}
+				want: false,
+			})
 		}
 	}
 

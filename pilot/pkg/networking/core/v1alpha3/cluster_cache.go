@@ -41,6 +41,7 @@ type clusterCache struct {
 	locality       *core.Locality // identifies the locality the cluster is generated for
 	proxyClusterID string         // identifies the kubernetes cluster a proxy is in
 	proxySidecar   bool           // identifies if this proxy is a Sidecar
+	hbone          bool
 	proxyView      model.ProxyView
 	metadataCerts  *metadataCerts // metadata certificates of proxy
 
@@ -49,7 +50,7 @@ type clusterCache struct {
 	downstreamAuto bool
 	supportsIPv4   bool
 
-	// Dependent configs
+	// dependent configs
 	service         *model.Service
 	destinationRule *model.ConsolidatedDestRule
 	envoyFilterKeys []string
@@ -57,7 +58,11 @@ type clusterCache struct {
 	serviceAccounts []string // contains all the service accounts associated with the service
 }
 
-func (t *clusterCache) Key() string {
+func (t *clusterCache) Type() string {
+	return model.CDSType
+}
+
+func (t *clusterCache) Key() any {
 	// nolint: gosec
 	// Not security sensitive code
 	h := hash.New()
@@ -76,6 +81,8 @@ func (t *clusterCache) Key() string {
 	h.Write([]byte(strconv.FormatBool(t.downstreamAuto)))
 	h.Write(Separator)
 	h.Write([]byte(strconv.FormatBool(t.supportsIPv4)))
+	h.Write(Separator)
+	h.Write([]byte(strconv.FormatBool(t.hbone)))
 	h.Write(Separator)
 
 	if t.proxyView != nil {
@@ -117,10 +124,10 @@ func (t *clusterCache) Key() string {
 	}
 	h.Write(Separator)
 
-	return h.Sum()
+	return h.Sum64()
 }
 
-func (t clusterCache) DependentConfigs() []model.ConfigHash {
+func (t *clusterCache) DependentConfigs() []model.ConfigHash {
 	drs := t.destinationRule.GetFrom()
 	configs := make([]model.ConfigHash, 0, len(drs)+1+len(t.envoyFilterKeys))
 	if t.destinationRule != nil {
@@ -138,11 +145,7 @@ func (t clusterCache) DependentConfigs() []model.ConfigHash {
 	return configs
 }
 
-func (t *clusterCache) DependentTypes() []kind.Kind {
-	return nil
-}
-
-func (t clusterCache) Cacheable() bool {
+func (t *clusterCache) Cacheable() bool {
 	return true
 }
 
@@ -171,6 +174,7 @@ func buildClusterKey(service *model.Service, port *model.Port, cb *ClusterBuilde
 		proxyClusterID:  cb.clusterID,
 		proxySidecar:    cb.sidecarProxy(),
 		proxyView:       cb.proxyView,
+		hbone:           cb.hbone,
 		http2:           port.Protocol.IsHTTP2(),
 		downstreamAuto:  cb.sidecarProxy() && util.IsProtocolSniffingEnabledForOutboundPort(port),
 		supportsIPv4:    cb.supportsIPv4,

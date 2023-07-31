@@ -55,12 +55,12 @@ import (
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/istio-agent/grpcxds"
+	"istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/echo/common"
 	echoproto "istio.io/istio/pkg/test/echo/proto"
 	"istio.io/istio/pkg/test/echo/server/endpoint"
 	"istio.io/istio/pkg/test/env"
-	"istio.io/pkg/log"
 )
 
 // Address of the test gRPC service, used in tests.
@@ -228,15 +228,17 @@ func TestGRPC(t *testing.T) {
 		hcm := &hcm.HttpConnectionManager{}
 		ss := &statefulsession.StatefulSession{}
 		sc := &cookiev3.CookieBasedSessionState{}
+		filterIndex := -1
 		for _, rsc := range msg.Resources {
 			valBytes := rsc.Value
 			ll := &listener.Listener{}
 			_ = proto.Unmarshal(valBytes, ll)
 			if strings.HasPrefix(ll.Name, "echo-persistent.test.svc.cluster.local:") {
 				proto.Unmarshal(ll.ApiListener.ApiListener.Value, hcm)
-				for _, f := range hcm.HttpFilters {
+				for index, f := range hcm.HttpFilters {
 					if f.Name == util.StatefulSessionFilter {
 						proto.Unmarshal(f.GetTypedConfig().Value, ss)
+						filterIndex = index
 						if ss.GetSessionState().Name == "envoy.http.stateful_session.cookie" {
 							proto.Unmarshal(ss.GetSessionState().TypedConfig.Value, sc)
 						}
@@ -246,6 +248,9 @@ func TestGRPC(t *testing.T) {
 		}
 		if sc.Cookie == nil {
 			t.Fatal("Failed to find session cookie")
+		}
+		if filterIndex == (len(hcm.HttpFilters) - 1) {
+			t.Fatal("session-cookie-filter cannot be the last filter!")
 		}
 		if sc.Cookie.Name != "test-cookie" {
 			t.Fatal("Missing expected cookie name", sc.Cookie)
@@ -496,7 +501,6 @@ func testRBAC(t *testing.T, grpcServer *xdsgrpc.GRPCServer, xdsresolver resolver
 			log.Error(err)
 		}
 	}()
-	time.Sleep(3 * time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
 	defer cancel()
 
@@ -526,7 +530,7 @@ func testRBAC(t *testing.T, grpcServer *xdsgrpc.GRPCServer, xdsresolver resolver
 }
 
 // From xds_resolver_test
-// testClientConn is a fake implemetation of resolver.ClientConn. All is does
+// testClientConn is a fake implementation of resolver.ClientConn. All is does
 // is to store the state received from the resolver locally and signal that
 // event through a channel.
 type testClientConn struct {

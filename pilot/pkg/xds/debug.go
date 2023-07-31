@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"net/netip"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -39,17 +40,15 @@ import (
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/util"
-	"istio.io/istio/pilot/pkg/serviceregistry/aggregate"
 	"istio.io/istio/pilot/pkg/util/protoconv"
 	v3 "istio.io/istio/pilot/pkg/xds/v3"
 	"istio.io/istio/pkg/config"
-	"istio.io/istio/pkg/config/schema/collection"
+	"istio.io/istio/pkg/config/schema/resource"
 	"istio.io/istio/pkg/config/xds"
-	"istio.io/istio/pkg/network"
+	istiolog "istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/security"
 	"istio.io/istio/pkg/util/protomarshal"
 	"istio.io/istio/pkg/util/sets"
-	istiolog "istio.io/pkg/log"
 )
 
 var indexTmpl = template.Must(template.New("index").Parse(`<html>
@@ -116,20 +115,21 @@ type AdsClients struct {
 
 // SyncStatus is the synchronization status between Pilot and a given Envoy
 type SyncStatus struct {
-	ClusterID            string `json:"cluster_id,omitempty"`
-	ProxyID              string `json:"proxy,omitempty"`
-	ProxyVersion         string `json:"proxy_version,omitempty"`
-	IstioVersion         string `json:"istio_version,omitempty"`
-	ClusterSent          string `json:"cluster_sent,omitempty"`
-	ClusterAcked         string `json:"cluster_acked,omitempty"`
-	ListenerSent         string `json:"listener_sent,omitempty"`
-	ListenerAcked        string `json:"listener_acked,omitempty"`
-	RouteSent            string `json:"route_sent,omitempty"`
-	RouteAcked           string `json:"route_acked,omitempty"`
-	EndpointSent         string `json:"endpoint_sent,omitempty"`
-	EndpointAcked        string `json:"endpoint_acked,omitempty"`
-	ExtensionConfigSent  string `json:"extensionconfig_sent,omitempty"`
-	ExtensionConfigAcked string `json:"extensionconfig_acked,omitempty"`
+	ClusterID            string         `json:"cluster_id,omitempty"`
+	ProxyID              string         `json:"proxy,omitempty"`
+	ProxyType            model.NodeType `json:"proxy_type,omitempty"`
+	ProxyVersion         string         `json:"proxy_version,omitempty"`
+	IstioVersion         string         `json:"istio_version,omitempty"`
+	ClusterSent          string         `json:"cluster_sent,omitempty"`
+	ClusterAcked         string         `json:"cluster_acked,omitempty"`
+	ListenerSent         string         `json:"listener_sent,omitempty"`
+	ListenerAcked        string         `json:"listener_acked,omitempty"`
+	RouteSent            string         `json:"route_sent,omitempty"`
+	RouteAcked           string         `json:"route_acked,omitempty"`
+	EndpointSent         string         `json:"endpoint_sent,omitempty"`
+	EndpointAcked        string         `json:"endpoint_acked,omitempty"`
+	ExtensionConfigSent  string         `json:"extensionconfig_sent,omitempty"`
+	ExtensionConfigAcked string         `json:"extensionconfig_acked,omitempty"`
 }
 
 // SyncedVersions shows what resourceVersion of a given resource has been acked by Envoy.
@@ -143,7 +143,6 @@ type SyncedVersions struct {
 // InitDebug initializes the debug handlers and adds a debug in-memory registry.
 func (s *DiscoveryServer) InitDebug(
 	mux *http.ServeMux,
-	sctl *aggregate.Controller,
 	enableProfiling bool,
 	fetchWebhook func() map[string]string,
 ) *http.ServeMux {
@@ -160,6 +159,8 @@ func (s *DiscoveryServer) AddDebugHandlers(mux, internalMux *http.ServeMux, enab
 	}
 
 	if enableProfiling {
+		runtime.SetMutexProfileFraction(features.MutexProfileFraction)
+		runtime.SetBlockProfileRate(features.MutexProfileFraction)
 		s.addDebugHandler(mux, internalMux, "/debug/pprof/", "Displays pprof index", pprof.Index)
 		s.addDebugHandler(mux, internalMux, "/debug/pprof/cmdline", "The command line invocation of the current program", pprof.Cmdline)
 		s.addDebugHandler(mux, internalMux, "/debug/pprof/profile", "CPU profile", pprof.Profile)
@@ -265,14 +266,17 @@ func isRequestFromLocalhost(r *http.Request) bool {
 
 // Syncz dumps the synchronization status of all Envoys connected to this Pilot instance
 func (s *DiscoveryServer) Syncz(w http.ResponseWriter, req *http.Request) {
+	namespace := req.URL.Query().Get("namespace")
+
 	syncz := make([]SyncStatus, 0)
-	for _, con := range s.Clients() {
+	for _, con := range s.SortedClients() {
 		node := con.proxy
-		if node != nil {
+		if node != nil && (namespace == "" || node.GetNamespace() == namespace) {
 			syncz = append(syncz, SyncStatus{
 				ProxyID:              node.ID,
-				ClusterID:            node.Metadata.ClusterID.String(),
-				IstioVersion:         node.Metadata.IstioVersion,
+				ProxyType:            node.Type,
+				ClusterID:            node.GetClusterID().String(),
+				IstioVersion:         node.GetIstioVersion(),
 				ClusterSent:          con.NonceSent(v3.ClusterType),
 				ClusterAcked:         con.NonceAcked(v3.ClusterType),
 				ListenerSent:         con.NonceSent(v3.ListenerType),
@@ -333,12 +337,12 @@ func (s *DiscoveryServer) cachez(w http.ResponseWriter, req *http.Request) {
 	}
 	snapshot := s.Cache.Snapshot()
 	resources := make(map[string][]string, len(snapshot)) // Key is typeUrl and value is resource names.
-	for key, resource := range snapshot {
+	for _, resource := range snapshot {
 		if resource == nil {
 			continue
 		}
 		resourceType := resource.Resource.TypeUrl
-		resources[resourceType] = append(resources[resourceType], resource.Name+"/"+key)
+		resources[resourceType] = append(resources[resourceType], resource.Name)
 	}
 	writeJSON(w, resources, req)
 }
@@ -379,18 +383,20 @@ func (s *DiscoveryServer) endpointz(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, resp, req)
 }
 
+const DistributionTrackingDisabledMessage = "Pilot Version tracking is disabled. It may be enabled by setting the " +
+	"PILOT_ENABLE_CONFIG_DISTRIBUTION_TRACKING environment variable to true."
+
 func (s *DiscoveryServer) distributedVersions(w http.ResponseWriter, req *http.Request) {
 	if !features.EnableDistributionTracking {
 		w.WriteHeader(http.StatusConflict)
-		_, _ = fmt.Fprint(w, "Pilot Version tracking is disabled.  Please set the "+
-			"PILOT_ENABLE_CONFIG_DISTRIBUTION_TRACKING environment variable to true to enable.")
+		_, _ = fmt.Fprint(w, DistributionTrackingDisabledMessage)
 		return
 	}
 	if resourceID := req.URL.Query().Get("resource"); resourceID != "" {
 		proxyNamespace := req.URL.Query().Get("proxy_namespace")
 		knownVersions := make(map[string]string)
 		var results []SyncedVersions
-		for _, con := range s.Clients() {
+		for _, con := range s.SortedClients() {
 			// wrap this in independent scope so that panic's don't bypass Unlock...
 			con.proxy.RLock()
 
@@ -461,8 +467,8 @@ func (s *DiscoveryServer) configz(w http.ResponseWriter, req *http.Request) {
 	if s.Env == nil || s.Env.ConfigStore == nil {
 		return
 	}
-	s.Env.ConfigStore.Schemas().ForEach(func(schema collection.Schema) bool {
-		cfg, _ := s.Env.ConfigStore.List(schema.Resource().GroupVersionKind(), "")
+	s.Env.ConfigStore.Schemas().ForEach(func(schema resource.Schema) bool {
+		cfg := s.Env.ConfigStore.List(schema.GroupVersionKind(), "")
 		for _, c := range cfg {
 			configs = append(configs, kubernetesConfig{c})
 		}
@@ -486,8 +492,8 @@ func (s *DiscoveryServer) resourcez(w http.ResponseWriter, req *http.Request) {
 	schemas := make([]config.GroupVersionKind, 0)
 
 	if s.Env != nil && s.Env.ConfigStore != nil {
-		s.Env.Schemas().ForEach(func(schema collection.Schema) bool {
-			schemas = append(schemas, schema.Resource().GroupVersionKind())
+		s.Env.Schemas().ForEach(func(schema resource.Schema) bool {
+			schemas = append(schemas, schema.GroupVersionKind())
 			return false
 		})
 	}
@@ -524,7 +530,7 @@ func (s *DiscoveryServer) telemetryz(w http.ResponseWriter, req *http.Request) {
 // It is mapped to /debug/connections.
 func (s *DiscoveryServer) connectionsHandler(w http.ResponseWriter, req *http.Request) {
 	adsClients := &AdsClients{}
-	connections := s.Clients()
+	connections := s.SortedClients()
 	adsClients.Total = len(connections)
 
 	for _, c := range connections {
@@ -556,7 +562,7 @@ func (s *DiscoveryServer) adsz(w http.ResponseWriter, req *http.Request) {
 	if con != nil {
 		connections = []*Connection{con}
 	} else {
-		connections = s.Clients()
+		connections = s.SortedClients()
 	}
 
 	adsClients := &AdsClients{}
@@ -582,9 +588,6 @@ func (s *DiscoveryServer) adsz(w http.ResponseWriter, req *http.Request) {
 		c.proxy.RUnlock()
 		adsClients.Connected = append(adsClients.Connected, adsClient)
 	}
-	sort.Slice(adsClients.Connected, func(i, j int) bool {
-		return adsClients.Connected[i].ConnectionID < adsClients.Connected[j].ConnectionID
-	})
 	writeJSON(w, adsClients, req)
 }
 
@@ -619,6 +622,18 @@ func (s *DiscoveryServer) ConfigDump(w http.ResponseWriter, req *http.Request) {
 	}
 	if ts := s.getResourceTypes(req); len(ts) != 0 {
 		resources := s.getConfigDumpByResourceType(con, nil, ts)
+		configDump := &admin.ConfigDump{}
+		for _, resource := range resources {
+			for _, rr := range resource {
+				configDump.Configs = append(configDump.Configs, rr.Resource)
+			}
+		}
+		writeJSON(w, configDump, req)
+		return
+	}
+
+	if con.proxy.IsZTunnel() {
+		resources := s.getConfigDumpByResourceType(con, nil, []string{v3.AddressType})
 		configDump := &admin.ConfigDump{}
 		for _, resource := range resources {
 			for _, rr := range resource {
@@ -691,7 +706,7 @@ func (s *DiscoveryServer) getConfigDumpByResourceType(conn *Connection, req *mod
 				case v3.ExtensionConfigurationType:
 					tce := &core.TypedExtensionConfig{}
 					if err := rr.GetResource().UnmarshalTo(tce); err != nil {
-						istiolog.Warnf("failed to unmarshal extenstion: %v", err)
+						istiolog.Warnf("failed to unmarshal extension: %v", err)
 						continue
 					}
 
@@ -901,7 +916,8 @@ func (s *DiscoveryServer) pushStatusHandler(w http.ResponseWriter, req *http.Req
 // PushContextDebug holds debug information for push context.
 type PushContextDebug struct {
 	AuthorizationPolicies *model.AuthorizationPolicies
-	NetworkGateways       map[network.ID][]model.NetworkGateway
+	NetworkGateways       []model.NetworkGateway
+	UnresolvedGateways    []model.NetworkGateway
 }
 
 // pushContextHandler dumps the current PushContext
@@ -913,7 +929,8 @@ func (s *DiscoveryServer) pushContextHandler(w http.ResponseWriter, req *http.Re
 	}
 	push.AuthorizationPolicies = pc.AuthzPolicies
 	if pc.NetworkManager() != nil {
-		push.NetworkGateways = pc.NetworkManager().GatewaysByNetwork()
+		push.NetworkGateways = pc.NetworkManager().AllGateways()
+		push.UnresolvedGateways = pc.NetworkManager().Unresolved.AllGateways()
 	}
 
 	writeJSON(w, push, req)
@@ -1096,7 +1113,7 @@ func sortMCSServices(svcs []model.MCSServiceInfo) []model.MCSServiceInfo {
 
 func (s *DiscoveryServer) clusterz(w http.ResponseWriter, req *http.Request) {
 	if s.ListRemoteClusters == nil {
-		w.WriteHeader(400)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, s.ListRemoteClusters(), req)

@@ -159,7 +159,6 @@ func TestWorkloadInstanceEqual(t *testing.T) {
 			Labels:          labels.Instance{"app": "prod-app"},
 			Address:         "an-address",
 			ServicePortName: "service-port-name",
-			EnvoyEndpoint:   nil,
 			ServiceAccount:  "service-account",
 			Network:         "Network",
 			Locality: Locality{
@@ -468,6 +467,60 @@ func TestServicesEqual(t *testing.T) {
 			},
 			shouldEq: false,
 			name:     "service with just label change",
+		},
+		{
+			first: &Service{
+				Attributes: ServiceAttributes{
+					K8sAttributes: K8sAttributes{
+						Type: "ClusterIP",
+					},
+				},
+			},
+			other: &Service{
+				Attributes: ServiceAttributes{
+					K8sAttributes: K8sAttributes{
+						Type: "NodePort",
+					},
+				},
+			},
+			shouldEq: false,
+			name:     "different types",
+		},
+		{
+			first: &Service{
+				Attributes: ServiceAttributes{
+					K8sAttributes: K8sAttributes{
+						ExternalName: "foo.com",
+					},
+				},
+			},
+			other: &Service{
+				Attributes: ServiceAttributes{
+					K8sAttributes: K8sAttributes{
+						ExternalName: "bar.com",
+					},
+				},
+			},
+			shouldEq: false,
+			name:     "different external names",
+		},
+		{
+			first: &Service{
+				Attributes: ServiceAttributes{
+					K8sAttributes: K8sAttributes{
+						NodeLocal: false,
+					},
+				},
+			},
+			other: &Service{
+				Attributes: ServiceAttributes{
+					K8sAttributes: K8sAttributes{
+						NodeLocal: true,
+					},
+				},
+			},
+			shouldEq: false,
+			name:     "different internal traffic policies",
 		},
 	}
 

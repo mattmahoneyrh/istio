@@ -33,11 +33,14 @@ import (
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/config/schema/kind"
+	"istio.io/istio/pkg/slices"
 	"istio.io/istio/pkg/test/util/retry"
 	"istio.io/istio/pkg/util/sets"
 )
 
 const (
+	testConfigNamespace = "default"
+
 	routeA = "http.80"
 	routeB = "https.443.https.my-gateway.testns"
 )
@@ -176,6 +179,20 @@ func TestAdsBadId(t *testing.T) {
 	ads.ExpectNoResponse(t)
 }
 
+func TestVersionNonce(t *testing.T) {
+	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
+	ads := s.ConnectADS().WithType(v3.ClusterType)
+	resp1 := ads.RequestResponseAck(t, nil)
+	fullPush(s)
+	resp2 := ads.ExpectResponse(t)
+	if !(resp1.VersionInfo < resp2.VersionInfo) {
+		t.Fatalf("version should be incrementing: %v -> %v", resp1.VersionInfo, resp2.VersionInfo)
+	}
+	if resp1.Nonce == resp2.Nonce {
+		t.Fatalf("nonce should change %v -> %v", resp1.Nonce, resp2.Nonce)
+	}
+}
+
 func TestAdsClusterUpdate(t *testing.T) {
 	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
 	ads := s.ConnectADS().WithType(v3.EndpointType)
@@ -243,11 +260,11 @@ func TestAdsPushScoping(t *testing.T) {
 
 		for _, name := range names {
 			hostname := host.Name(name)
-			configsUpdated[model.ConfigKey{
+			configsUpdated.Insert(model.ConfigKey{
 				Kind:      kind.ServiceEntry,
 				Name:      string(hostname),
 				Namespace: ns,
-			}] = struct{}{}
+			})
 
 			s.MemRegistry.AddService(&model.Service{
 				Hostname:       hostname,
@@ -280,14 +297,14 @@ func TestAdsPushScoping(t *testing.T) {
 			s.MemRegistry.AddEndpoint(hostname, "http-main", 2080, "192.168.1.10", i)
 		}
 
-		s.Discovery.ConfigUpdate(&model.PushRequest{Full: false, ConfigsUpdated: sets.New(model.ConfigKey{Kind: kind.ServiceEntry, Name: string(hostname), Namespace: model.IstioDefaultConfigNamespace})})
+		s.Discovery.ConfigUpdate(&model.PushRequest{Full: false, ConfigsUpdated: sets.New(model.ConfigKey{Kind: kind.ServiceEntry, Name: string(hostname), Namespace: testConfigNamespace})})
 	}
 
 	addVirtualService := func(i int, hosts []string, dest string) {
 		if _, err := s.Store().Create(config.Config{
 			Meta: config.Meta{
 				GroupVersionKind: gvk.VirtualService,
-				Name:             fmt.Sprintf("vs%d", i), Namespace: model.IstioDefaultConfigNamespace,
+				Name:             fmt.Sprintf("vs%d", i), Namespace: testConfigNamespace,
 			},
 			Spec: &networking.VirtualService{
 				Hosts: hosts,
@@ -306,14 +323,14 @@ func TestAdsPushScoping(t *testing.T) {
 		}
 	}
 	removeVirtualService := func(i int) {
-		s.Store().Delete(gvk.VirtualService, fmt.Sprintf("vs%d", i), model.IstioDefaultConfigNamespace, nil)
+		s.Store().Delete(gvk.VirtualService, fmt.Sprintf("vs%d", i), testConfigNamespace, nil)
 	}
 
 	addDelegateVirtualService := func(i int, hosts []string, dest string) {
 		if _, err := s.Store().Create(config.Config{
 			Meta: config.Meta{
 				GroupVersionKind: gvk.VirtualService,
-				Name:             fmt.Sprintf("rootvs%d", i), Namespace: model.IstioDefaultConfigNamespace,
+				Name:             fmt.Sprintf("rootvs%d", i), Namespace: testConfigNamespace,
 			},
 			Spec: &networking.VirtualService{
 				Hosts: hosts,
@@ -322,7 +339,7 @@ func TestAdsPushScoping(t *testing.T) {
 					Name: "dest-foo",
 					Delegate: &networking.Delegate{
 						Name:      fmt.Sprintf("delegatevs%d", i),
-						Namespace: model.IstioDefaultConfigNamespace,
+						Namespace: testConfigNamespace,
 					},
 				}},
 				ExportTo: nil,
@@ -334,7 +351,7 @@ func TestAdsPushScoping(t *testing.T) {
 		if _, err := s.Store().Create(config.Config{
 			Meta: config.Meta{
 				GroupVersionKind: gvk.VirtualService,
-				Name:             fmt.Sprintf("delegatevs%d", i), Namespace: model.IstioDefaultConfigNamespace,
+				Name:             fmt.Sprintf("delegatevs%d", i), Namespace: testConfigNamespace,
 			},
 			Spec: &networking.VirtualService{
 				Http: []*networking.HTTPRoute{{
@@ -356,7 +373,7 @@ func TestAdsPushScoping(t *testing.T) {
 		if _, err := s.Store().Update(config.Config{
 			Meta: config.Meta{
 				GroupVersionKind: gvk.VirtualService,
-				Name:             fmt.Sprintf("delegatevs%d", i), Namespace: model.IstioDefaultConfigNamespace,
+				Name:             fmt.Sprintf("delegatevs%d", i), Namespace: testConfigNamespace,
 			},
 			Spec: &networking.VirtualService{
 				Http: []*networking.HTTPRoute{{
@@ -382,15 +399,15 @@ func TestAdsPushScoping(t *testing.T) {
 	}
 
 	removeDelegateVirtualService := func(i int) {
-		s.Store().Delete(gvk.VirtualService, fmt.Sprintf("rootvs%d", i), model.IstioDefaultConfigNamespace, nil)
-		s.Store().Delete(gvk.VirtualService, fmt.Sprintf("delegatevs%d", i), model.IstioDefaultConfigNamespace, nil)
+		s.Store().Delete(gvk.VirtualService, fmt.Sprintf("rootvs%d", i), testConfigNamespace, nil)
+		s.Store().Delete(gvk.VirtualService, fmt.Sprintf("delegatevs%d", i), testConfigNamespace, nil)
 	}
 
 	addDestinationRule := func(i int, host string) {
 		if _, err := s.Store().Create(config.Config{
 			Meta: config.Meta{
 				GroupVersionKind: gvk.DestinationRule,
-				Name:             fmt.Sprintf("dr%d", i), Namespace: model.IstioDefaultConfigNamespace,
+				Name:             fmt.Sprintf("dr%d", i), Namespace: testConfigNamespace,
 			},
 			Spec: &networking.DestinationRule{
 				Host:     host,
@@ -401,27 +418,27 @@ func TestAdsPushScoping(t *testing.T) {
 		}
 	}
 	removeDestinationRule := func(i int) {
-		s.Store().Delete(gvk.DestinationRule, fmt.Sprintf("dr%d", i), model.IstioDefaultConfigNamespace, nil)
+		s.Store().Delete(gvk.DestinationRule, fmt.Sprintf("dr%d", i), testConfigNamespace, nil)
 	}
 
 	sc := &networking.Sidecar{
 		Egress: []*networking.IstioEgressListener{
 			{
-				Hosts: []string{model.IstioDefaultConfigNamespace + "/*" + svcSuffix},
+				Hosts: []string{testConfigNamespace + "/*" + svcSuffix},
 			},
 		},
 	}
 	scc := config.Config{
 		Meta: config.Meta{
 			GroupVersionKind: gvk.Sidecar,
-			Name:             "sc", Namespace: model.IstioDefaultConfigNamespace,
+			Name:             "sc", Namespace: testConfigNamespace,
 		},
 		Spec: sc,
 	}
 	notMatchedScc := config.Config{
 		Meta: config.Meta{
 			GroupVersionKind: gvk.Sidecar,
-			Name:             "notMatchedSc", Namespace: model.IstioDefaultConfigNamespace,
+			Name:             "notMatchedSc", Namespace: testConfigNamespace,
 		},
 		Spec: &networking.Sidecar{
 			WorkloadSelector: &networking.WorkloadSelector{
@@ -432,7 +449,7 @@ func TestAdsPushScoping(t *testing.T) {
 	if _, err := s.Store().Create(scc); err != nil {
 		t.Fatal(err)
 	}
-	addService(model.IstioDefaultConfigNamespace, 1, 2, 3)
+	addService(testConfigNamespace, 1, 2, 3)
 
 	adscConn := s.Connect(nil, nil, nil)
 	defer adscConn.Close()
@@ -471,7 +488,7 @@ func TestAdsPushScoping(t *testing.T) {
 			desc:            "Add a scoped service",
 			ev:              model.EventAdd,
 			svcIndexes:      []int{4},
-			ns:              model.IstioDefaultConfigNamespace,
+			ns:              testConfigNamespace,
 			expectedUpdates: []string{v3.ListenerType},
 		}, // then: default 1,2,3,4
 		{
@@ -481,7 +498,7 @@ func TestAdsPushScoping(t *testing.T) {
 				name    string
 				indexes []int
 			}{{fmt.Sprintf("svc%d%s", 4, svcSuffix), []int{1, 2}}},
-			ns:              model.IstioDefaultConfigNamespace,
+			ns:              testConfigNamespace,
 			expectedUpdates: []string{v3.EndpointType},
 		}, // then: default 1,2,3,4
 		{
@@ -526,7 +543,7 @@ func TestAdsPushScoping(t *testing.T) {
 			desc:              "Add a unscoped(name not match) service",
 			ev:                model.EventAdd,
 			svcNames:          []string{"foo.com"},
-			ns:                model.IstioDefaultConfigNamespace,
+			ns:                testConfigNamespace,
 			unexpectedUpdates: []string{v3.ClusterType},
 		}, // then: default 1,2,3,4, foo.com; ns1: 11
 		{
@@ -536,7 +553,7 @@ func TestAdsPushScoping(t *testing.T) {
 				name    string
 				indexes []int
 			}{{"foo.com", []int{1, 2}}},
-			ns:                model.IstioDefaultConfigNamespace,
+			ns:                testConfigNamespace,
 			unexpectedUpdates: []string{v3.EndpointType},
 		}, // then: default 1,2,3,4
 		{
@@ -601,7 +618,7 @@ func TestAdsPushScoping(t *testing.T) {
 				name    string
 				indexes []int
 			}{{"foo.com", []int{1, 2}}},
-			ns:              model.IstioDefaultConfigNamespace,
+			ns:              testConfigNamespace,
 			expectedUpdates: []string{v3.EndpointType},
 		},
 		{
@@ -648,14 +665,14 @@ func TestAdsPushScoping(t *testing.T) {
 			desc:            "Remove a scoped service",
 			ev:              model.EventDelete,
 			svcIndexes:      []int{4},
-			ns:              model.IstioDefaultConfigNamespace,
+			ns:              testConfigNamespace,
 			expectedUpdates: []string{v3.ListenerType},
 		}, // then: default 1,2,3, foo.com; ns: 11
 		{
 			desc:              "Remove a unscoped(name not match) service",
 			ev:                model.EventDelete,
 			svcNames:          []string{"foo.com"},
-			ns:                model.IstioDefaultConfigNamespace,
+			ns:                testConfigNamespace,
 			unexpectedUpdates: []string{v3.ClusterType},
 		}, // then: default 1,2,3; ns1: 11
 		{
@@ -669,14 +686,14 @@ func TestAdsPushScoping(t *testing.T) {
 			desc:              "Add an unmatched Sidecar config",
 			ev:                model.EventAdd,
 			cfgs:              []config.Config{notMatchedScc},
-			ns:                model.IstioDefaultConfigNamespace,
+			ns:                testConfigNamespace,
 			unexpectedUpdates: []string{v3.ListenerType, v3.RouteType, v3.ClusterType, v3.EndpointType},
 		},
 		{
 			desc:            "Update the Sidecar config",
 			ev:              model.EventUpdate,
 			cfgs:            []config.Config{scc},
-			ns:              model.IstioDefaultConfigNamespace,
+			ns:              testConfigNamespace,
 			expectedUpdates: []string{v3.ListenerType, v3.RouteType, v3.ClusterType, v3.EndpointType},
 		},
 	}
@@ -767,12 +784,12 @@ func TestAdsPushScoping(t *testing.T) {
 			timeout := time.Millisecond * 200
 			upd, _ := adscConn.Wait(timeout, wantUpdates...)
 			for _, expect := range c.expectedUpdates {
-				if !contains(upd, expect) {
+				if !slices.Contains(upd, expect) {
 					t.Fatalf("expected update %s not in updates %v", expect, upd)
 				}
 			}
 			for _, unexpect := range c.unexpectedUpdates {
-				if contains(upd, unexpect) {
+				if slices.Contains(upd, unexpect) {
 					t.Fatalf("expected to not get update %s, but it is in updates %v", unexpect, upd)
 				}
 			}

@@ -202,8 +202,8 @@ func ConstructSdsSecretConfig(name string) *tls.SdsSecretConfig {
 	return cfg
 }
 
-func appendURIPrefixToTrustDomain(trustDomainAliases []string) []string {
-	var res []string
+func AppendURIPrefixToTrustDomain(trustDomainAliases []string) []string {
+	res := make([]string, 0, len(trustDomainAliases))
 	for _, td := range trustDomainAliases {
 		res = append(res, spiffe.URIPrefix+td+"/")
 	}
@@ -227,7 +227,7 @@ func ApplyToCommonTLSContext(tlsContext *tls.CommonTlsContext, proxy *model.Prox
 	// TODO: if user explicitly specifies SANs - should we alter his explicit config by adding all spifee aliases?
 	matchSAN := util.StringToExactMatch(subjectAltNames)
 	if len(trustDomainAliases) > 0 {
-		matchSAN = append(matchSAN, util.StringToPrefixMatch(appendURIPrefixToTrustDomain(trustDomainAliases))...)
+		matchSAN = append(matchSAN, util.StringToPrefixMatch(AppendURIPrefixToTrustDomain(trustDomainAliases))...)
 	}
 
 	// configure server listeners with SDS.
@@ -255,6 +255,12 @@ func ApplyCustomSDSToClientCommonTLSContext(tlsContext *tls.CommonTlsContext,
 			ConstructSdsSecretConfigForCredential(tlsOpts.CredentialName, credentialSocketExist),
 		}
 	}
+
+	// If the InsecureSkipVerify is true, there is no need to configure CA Cert and SAN.
+	if tlsOpts.GetInsecureSkipVerify().GetValue() {
+		return
+	}
+
 	// create SDS config for gateway to fetch certificate validation context
 	// at gateway agent.
 	defaultValidationContext := &tls.CertificateValidationContext{
@@ -278,9 +284,9 @@ func ApplyCredentialSDSToServerCommonTLSContext(tlsContext *tls.CommonTlsContext
 	tlsContext.TlsCertificateSdsSecretConfigs = []*tls.SdsSecretConfig{
 		ConstructSdsSecretConfigForCredential(tlsOpts.CredentialName, credentialSocketExist),
 	}
-	// If tls mode is MUTUAL, create SDS config for gateway/sidecar to fetch certificate validation context
+	// If tls mode is MUTUAL/OPTIONAL_MUTUAL, create SDS config for gateway/sidecar to fetch certificate validation context
 	// at gateway agent. Otherwise, use the static certificate validation context config.
-	if tlsOpts.Mode == networking.ServerTLSSettings_MUTUAL {
+	if tlsOpts.Mode == networking.ServerTLSSettings_MUTUAL || tlsOpts.Mode == networking.ServerTLSSettings_OPTIONAL_MUTUAL {
 		defaultValidationContext := &tls.CertificateValidationContext{
 			MatchSubjectAltNames:  util.StringToExactMatch(tlsOpts.SubjectAltNames),
 			VerifyCertificateSpki: tlsOpts.VerifyCertificateSpki,

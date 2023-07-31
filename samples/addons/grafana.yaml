@@ -4,10 +4,10 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   labels:
-    helm.sh/chart: grafana-6.31.1
+    helm.sh/chart: grafana-6.57.4
     app.kubernetes.io/name: grafana
     app.kubernetes.io/instance: grafana
-    app.kubernetes.io/version: "9.0.1"
+    app.kubernetes.io/version: "9.5.5"
     app.kubernetes.io/managed-by: Helm
   name: grafana
   namespace: istio-system
@@ -19,13 +19,12 @@ metadata:
   name: grafana
   namespace: istio-system
   labels:
-    helm.sh/chart: grafana-6.31.1
+    helm.sh/chart: grafana-6.57.4
     app.kubernetes.io/name: grafana
     app.kubernetes.io/instance: grafana
-    app.kubernetes.io/version: "9.0.1"
+    app.kubernetes.io/version: "9.5.5"
     app.kubernetes.io/managed-by: Helm
 data:
-  allow-snippet-annotations: "false"
   grafana.ini: |
     [analytics]
     check_for_updates = true
@@ -38,7 +37,8 @@ data:
     logs = /var/log/grafana
     plugins = /var/lib/grafana/plugins
     provisioning = /etc/grafana/provisioning
-
+    [server]
+    domain = ''
   datasources.yaml: |
     apiVersion: 1
     datasources:
@@ -51,6 +51,15 @@ data:
       orgId: 1
       type: prometheus
       url: http://prometheus:9090
+    - access: proxy
+      editable: true
+      isDefault: false
+      jsonData:
+        timeInterval: 5s
+      name: Loki
+      orgId: 1
+      type: loki
+      url: http://loki:3100
   dashboardproviders.yaml: |
     apiVersion: 1
     providers:
@@ -76,10 +85,10 @@ metadata:
   name: grafana
   namespace: istio-system
   labels:
-    helm.sh/chart: grafana-6.31.1
+    helm.sh/chart: grafana-6.57.4
     app.kubernetes.io/name: grafana
     app.kubernetes.io/instance: grafana
-    app.kubernetes.io/version: "9.0.1"
+    app.kubernetes.io/version: "9.5.5"
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
@@ -88,7 +97,6 @@ spec:
       port: 3000
       protocol: TCP
       targetPort: 3000
-
   selector:
     app.kubernetes.io/name: grafana
     app.kubernetes.io/instance: grafana
@@ -100,10 +108,10 @@ metadata:
   name: grafana
   namespace: istio-system
   labels:
-    helm.sh/chart: grafana-6.31.1
+    helm.sh/chart: grafana-6.57.4
     app.kubernetes.io/name: grafana
     app.kubernetes.io/instance: grafana
-    app.kubernetes.io/version: "9.0.1"
+    app.kubernetes.io/version: "9.5.5"
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
@@ -122,9 +130,10 @@ spec:
         app: grafana
         sidecar.istio.io/inject: "false"
       annotations:
-        checksum/config: 00cbea6713b515cc981941cb5cc4004e842e678e23fbb177bff4d890ac2d71da
+        checksum/config: aec3d18ca2ea82d1d48f8965db1440aba0680ed2f32c5a29e6cdb5e7afc8b395
         checksum/dashboards-json-config: 01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
         checksum/sc-dashboard-provider-config: 01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
+        kubectl.kubernetes.io/default-container: grafana
     spec:
       
       serviceAccountName: grafana
@@ -132,12 +141,20 @@ spec:
       securityContext:
         fsGroup: 472
         runAsGroup: 472
+        runAsNonRoot: true
         runAsUser: 472
       enableServiceLinks: true
       containers:
         - name: grafana
-          image: "grafana/grafana:9.0.1"
+          image: "docker.io/grafana/grafana:9.5.5"
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            seccompProfile:
+              type: RuntimeDefault
           volumeMounts:
             - name: config
               mountPath: "/etc/grafana/grafana.ini"
@@ -155,13 +172,20 @@ spec:
               mountPath: "/etc/grafana/provisioning/dashboards/dashboardproviders.yaml"
               subPath: "dashboardproviders.yaml"
           ports:
-            - name: service
-              containerPort: 3000
-              protocol: TCP
             - name: grafana
               containerPort: 3000
               protocol: TCP
+            - name: gossip-tcp
+              containerPort: 9094
+              protocol: TCP
+            - name: gossip-udp
+              containerPort: 9094
+              protocol: UDP
           env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: GF_PATHS_DATA
               value: /var/lib/grafana/
             - name: GF_PATHS_LOGS
@@ -177,9 +201,9 @@ spec:
             - name: "GF_AUTH_BASIC_ENABLED"
               value: "false"
             - name: "GF_SECURITY_ADMIN_PASSWORD"
-              value: "-"
+              value: "admin"
             - name: "GF_SECURITY_ADMIN_USER"
-              value: "-"
+              value: "admin"
           livenessProbe:
             failureThreshold: 10
             httpGet:
@@ -191,13 +215,10 @@ spec:
             httpGet:
               path: /api/health
               port: 3000
-          resources:
-            {}
       volumes:
         - name: config
           configMap:
             name: grafana
-          
         - name: dashboards-istio
           configMap:
             name: istio-grafana-dashboards
@@ -640,7 +661,8 @@ data:
     destination_workload_namespace), 0.001)\",\"format\":\"time_series\",\"intervalFactor\":1,\"legendFormat\":\"{{
     destination_workload }}.{{destination_workload_namespace }}\",\"refId\":\"B\",\"step\":2}],\"thresholds\":[],\"timeFrom\":null,\"timeRegions\":[],\"timeShift\":null,\"title\":\"Bytes
     Sent to Incoming TCP Connection\",\"tooltip\":{\"shared\":true,\"sort\":0,\"value_type\":\"individual\"},\"type\":\"graph\",\"xaxis\":{\"buckets\":null,\"mode\":\"time\",\"name\":null,\"show\":true,\"values\":[]},\"yaxes\":[{\"format\":\"Bps\",\"label\":null,\"logBase\":1,\"max\":null,\"min\":\"0\",\"show\":true},{\"format\":\"short\",\"label\":null,\"logBase\":1,\"max\":null,\"min\":null,\"show\":true}],\"yaxis\":{\"align\":false,\"alignLevel\":null}}],\"title\":\"Service
-    Workloads\",\"type\":\"row\"}],\"refresh\":\"1m\",\"schemaVersion\":26,\"style\":\"dark\",\"tags\":[],\"templating\":{\"list\":[{\"current\":{\"selected\":true,\"text\":\"default\",\"value\":\"default\"},\"hide\":0,\"includeAll\":false,\"label\":null,\"multi\":false,\"name\":\"datasource\",\"options\":[],\"query\":\"prometheus\",\"queryValue\":\"\",\"refresh\":1,\"regex\":\"\",\"skipUrlSync\":false,\"type\":\"datasource\"},{\"allValue\":null,\"current\":{},\"datasource\":\"Prometheus\",\"definition\":\"\",\"hide\":0,\"includeAll\":false,\"label\":\"Service\",\"multi\":false,\"name\":\"service\",\"options\":[],\"query\":\"label_values(destination_service)\",\"refresh\":1,\"regex\":\"\",\"skipUrlSync\":false,\"sort\":0,\"tagValuesQuery\":\"\",\"tags\":[],\"tagsQuery\":\"\",\"type\":\"query\",\"useTags\":false},{\"allValue\":null,\"current\":{\"selected\":true,\"text\":\"destination\",\"value\":\"destination\"},\"datasource\":\"Prometheus\",\"definition\":\"\",\"hide\":0,\"includeAll\":false,\"label\":\"Reporter\",\"multi\":true,\"name\":\"qrep\",\"options\":[],\"query\":\"label_values(reporter)\",\"refresh\":1,\"regex\":\"\",\"skipUrlSync\":false,\"sort\":1,\"tagValuesQuery\":\"\",\"tags\":[],\"tagsQuery\":\"\",\"type\":\"query\",\"useTags\":false},{\"allValue\":null,\"current\":{},\"datasource\":\"Prometheus\",\"definition\":\"\",\"hide\":0,\"includeAll\":true,\"label\":\"Client
+    Workloads\",\"type\":\"row\"}],\"refresh\":\"1m\",\"schemaVersion\":26,\"style\":\"dark\",\"tags\":[],\"templating\":{\"list\":[{\"current\":{\"selected\":true,\"text\":\"default\",\"value\":\"default\"},\"hide\":0,\"includeAll\":false,\"label\":null,\"multi\":false,\"name\":\"datasource\",\"options\":[],\"query\":\"prometheus\",\"queryValue\":\"\",\"refresh\":1,\"regex\":\"\",\"skipUrlSync\":false,\"type\":\"datasource\"},{\"allValue\":null,\"current\":{},\"datasource\":\"Prometheus\",\"definition\":\"\",\"hide\":0,\"includeAll\":false,\"label\":\"Service\",\"multi\":false,\"name\":\"service\",\"options\":[],\"query\":\"query_result(sum(istio_requests_total{})
+    by (destination_service) or sum(istio_tcp_sent_bytes_total{}) by (destination_service))\",\"refresh\":1,\"regex\":\"/.*destination_service=\\\"([^\\\"]*).*/\",\"skipUrlSync\":false,\"sort\":0,\"tagValuesQuery\":\"\",\"tags\":[],\"tagsQuery\":\"\",\"type\":\"query\",\"useTags\":false},{\"allValue\":null,\"current\":{\"selected\":true,\"text\":\"destination\",\"value\":\"destination\"},\"datasource\":\"Prometheus\",\"definition\":\"\",\"hide\":0,\"includeAll\":false,\"label\":\"Reporter\",\"multi\":true,\"name\":\"qrep\",\"query\":\"source,destination\",\"refresh\":1,\"regex\":\"\",\"skipUrlSync\":false,\"sort\":1,\"tagValuesQuery\":\"\",\"tags\":[],\"tagsQuery\":\"\",\"type\":\"custom\",\"useTags\":false},{\"allValue\":null,\"current\":{},\"datasource\":\"Prometheus\",\"definition\":\"\",\"hide\":0,\"includeAll\":true,\"label\":\"Client
     Cluster\",\"multi\":true,\"name\":\"srccluster\",\"options\":[],\"query\":\"query_result(sum(istio_requests_total{reporter=~\\\"$qrep\\\",
     destination_service=\\\"$service\\\"}) by (source_cluster) or sum(istio_tcp_sent_bytes_total{reporter=~\\\"$qrep\\\",
     destination_service=~\\\"$service\\\"}) by (source_cluster))\",\"refresh\":1,\"regex\":\"/.*cluster=\\\"([^\\\"]*).*/\",\"skipUrlSync\":false,\"sort\":2,\"tagValuesQuery\":\"\",\"tags\":[],\"tagsQuery\":\"\",\"type\":\"query\",\"useTags\":false},{\"allValue\":null,\"current\":{},\"datasource\":\"Prometheus\",\"definition\":\"\",\"hide\":0,\"includeAll\":true,\"label\":\"Client
@@ -1095,7 +1117,7 @@ data:
     by (destination_workload) or sum(istio_requests_total{source_workload_namespace=~\\\"$namespace\\\"})
     by (source_workload)) or (sum(istio_tcp_sent_bytes_total{destination_workload_namespace=~\\\"$namespace\\\"})
     by (destination_workload) or sum(istio_tcp_sent_bytes_total{source_workload_namespace=~\\\"$namespace\\\"})
-    by (source_workload)))\",\"refresh\":1,\"regex\":\"/.*workload=\\\"([^\\\"]*).*/\",\"skipUrlSync\":false,\"sort\":1,\"tagValuesQuery\":\"\",\"tags\":[],\"tagsQuery\":\"\",\"type\":\"query\",\"useTags\":false},{\"allValue\":null,\"current\":{\"selected\":true,\"text\":\"destination\",\"value\":\"destination\"},\"datasource\":\"Prometheus\",\"definition\":\"\",\"hide\":0,\"includeAll\":false,\"label\":\"Reporter\",\"multi\":true,\"name\":\"qrep\",\"options\":[],\"query\":\"label_values(reporter)\",\"refresh\":1,\"regex\":\"\",\"skipUrlSync\":false,\"sort\":2,\"tagValuesQuery\":\"\",\"tags\":[],\"tagsQuery\":\"\",\"type\":\"query\",\"useTags\":false},{\"allValue\":null,\"current\":{},\"datasource\":\"Prometheus\",\"definition\":\"\",\"hide\":0,\"includeAll\":true,\"label\":\"Inbound
+    by (source_workload)))\",\"refresh\":1,\"regex\":\"/.*workload=\\\"([^\\\"]*).*/\",\"skipUrlSync\":false,\"sort\":1,\"tagValuesQuery\":\"\",\"tags\":[],\"tagsQuery\":\"\",\"type\":\"query\",\"useTags\":false},{\"allValue\":null,\"current\":{\"selected\":true,\"text\":\"destination\",\"value\":\"destination\"},\"datasource\":\"Prometheus\",\"definition\":\"\",\"hide\":0,\"includeAll\":false,\"label\":\"Reporter\",\"multi\":true,\"name\":\"qrep\",\"query\":\"source,destination\",\"refresh\":1,\"regex\":\"\",\"skipUrlSync\":false,\"sort\":2,\"tagValuesQuery\":\"\",\"tags\":[],\"tagsQuery\":\"\",\"type\":\"custom\",\"useTags\":false},{\"allValue\":null,\"current\":{},\"datasource\":\"Prometheus\",\"definition\":\"\",\"hide\":0,\"includeAll\":true,\"label\":\"Inbound
     Workload Namespace\",\"multi\":true,\"name\":\"srcns\",\"options\":[],\"query\":\"query_result(sum(istio_requests_total{reporter=~\\\"$qrep\\\",
     destination_workload=\\\"$workload\\\", destination_workload_namespace=~\\\"$namespace\\\"})
     by (source_workload_namespace) or sum(istio_tcp_sent_bytes_total{reporter=~\\\"$qrep\\\",

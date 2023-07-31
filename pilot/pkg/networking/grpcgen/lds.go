@@ -31,7 +31,6 @@ import (
 	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
 
 	"istio.io/api/label"
-	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/util"
 	"istio.io/istio/pilot/pkg/security/authn"
@@ -73,7 +72,7 @@ func buildInboundListeners(node *model.Proxy, push *model.PushContext, names []s
 		return nil
 	}
 	var out model.Resources
-	policyApplier := factory.NewPolicyApplier(push, node.Metadata.Namespace, node.Labels)
+	mtlsPolicy := factory.NewMtlsPolicy(push, node.Metadata.Namespace, node.Labels)
 	serviceInstancesByPort := map[uint32]*model.ServiceInstance{}
 	for _, si := range node.ServiceInstances {
 		serviceInstancesByPort[si.Endpoint.EndpointPort] = si
@@ -107,14 +106,14 @@ func buildInboundListeners(node *model.Proxy, push *model.PushContext, names []s
 					},
 				},
 			}},
-			FilterChains: buildInboundFilterChains(node, push, si, policyApplier),
+			FilterChains: buildInboundFilterChains(node, push, si, mtlsPolicy),
 			// the following must not be set or the client will NACK
 			ListenerFilters: nil,
 			UseOriginalDst:  nil,
 		}
 		// add extra addresses for the listener
 		extrAddresses := si.Service.GetExtraAddressesForProxy(node)
-		if features.EnableDualStack && len(extrAddresses) > 0 {
+		if len(extrAddresses) > 0 {
 			ll.AdditionalAddresses = util.BuildAdditionalAddresses(extrAddresses, uint32(listenPort), node)
 		}
 
@@ -127,8 +126,8 @@ func buildInboundListeners(node *model.Proxy, push *model.PushContext, names []s
 }
 
 // nolint: unparam
-func buildInboundFilterChains(node *model.Proxy, push *model.PushContext, si *model.ServiceInstance, applier authn.PolicyApplier) []*listener.FilterChain {
-	mode := applier.GetMutualTLSModeForPort(si.Endpoint.EndpointPort)
+func buildInboundFilterChains(node *model.Proxy, push *model.PushContext, si *model.ServiceInstance, checker authn.MtlsPolicy) []*listener.FilterChain {
+	mode := checker.GetMutualTLSModeForPort(si.Endpoint.EndpointPort)
 
 	// auto-mtls label is set - clients will attempt to connect using mtls, and
 	// gRPC doesn't support permissive.
@@ -152,7 +151,7 @@ func buildInboundFilterChains(node *model.Proxy, push *model.PushContext, si *mo
 		mode = model.MTLSDisable
 	}
 	if mode == model.MTLSPermissive {
-		// TODO gRPC's filter chain match is super limted - only effective transport_protocol match is "raw_buffer"
+		// TODO gRPC's filter chain match is super limited - only effective transport_protocol match is "raw_buffer"
 		// see https://github.com/grpc/proposal/blob/master/A36-xds-for-servers.md for detail
 		// No need to warn on each push - the behavior is still consistent with auto-mtls, which is the
 		// replacement for permissive.
@@ -242,7 +241,7 @@ func buildInboundFilterChain(node *model.Proxy, push *model.PushContext, nameSuf
 
 // buildRBAC builds the RBAC config expected by gRPC.
 //
-// See: xds/interal/httpfilter/rbac
+// See: xds/internal/httpfilter/rbac
 //
 // TODO: gRPC also supports 'per route override' - not yet clear how to use it, Istio uses path expressions instead and we don't generate
 // vhosts or routes for the inbound listener.
@@ -263,7 +262,7 @@ func buildRBAC(node *model.Proxy, push *model.PushContext, suffix string, contex
 			name := fmt.Sprintf("%s-%s-%d", policy.Namespace, policy.Name, i)
 			m, err := authzmodel.New(rule)
 			if err != nil {
-				log.Warn("Invalid rule ", rule, err)
+				log.Warnf("Invalid rule %v: %v", rule, err)
 				continue
 			}
 			generated, _ := m.Generate(false, true, a)
@@ -292,7 +291,7 @@ func buildOutboundListeners(node *model.Proxy, push *model.PushContext, filter l
 				}
 				filters := supportedFilters
 				if sessionFilter := util.BuildStatefulSessionFilter(sv); sessionFilter != nil {
-					filters = append(filters, sessionFilter)
+					filters = append([]*hcm.HttpFilter{sessionFilter}, filters...)
 				}
 				ll := &listener.Listener{
 					Name: net.JoinHostPort(matchedHost, sPort),
@@ -325,7 +324,7 @@ func buildOutboundListeners(node *model.Proxy, push *model.PushContext, filter l
 				}
 				// add extra addresses for the listener
 				extrAddresses := sv.GetExtraAddressesForProxy(node)
-				if features.EnableDualStack && len(extrAddresses) > 0 {
+				if len(extrAddresses) > 0 {
 					ll.AdditionalAddresses = util.BuildAdditionalAddresses(extrAddresses, uint32(p.Port), node)
 				}
 
