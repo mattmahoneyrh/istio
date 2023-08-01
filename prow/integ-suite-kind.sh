@@ -128,10 +128,11 @@ export HUB=${HUB:-"istio-testing"}
 export TAG="${TAG:-"istio-testing"}"
 
 # If we're not intending to pull from an actual remote registry, use the local kind registry
-if [[ -z "${SKIP_BUILD:-}" ]]; then
-  HUB="${KIND_REGISTRY}"
-  export HUB
-fi
+# Matt
+#if [[ -z "${SKIP_BUILD:-}" ]]; then
+#  HUB="${KIND_REGISTRY}"
+#  export HUB
+#fi
 
 # Setup junit report and verbose logging
 export T="${T:-"-v -count=1"}"
