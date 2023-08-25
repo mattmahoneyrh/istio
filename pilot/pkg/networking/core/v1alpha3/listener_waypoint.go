@@ -73,6 +73,7 @@ func (lb *ListenerBuilder) buildWaypointInbound() []*listener.Listener {
 }
 
 func (lb *ListenerBuilder) buildHCMConnectTerminateChain(routes []*route.Route) []*listener.Filter {
+	ph := GetProxyHeaders(lb.node, lb.push, istionetworking.ListenerClassSidecarInbound)
 	h := &hcm.HttpConnectionManager{
 		StatPrefix: ConnectTerminate,
 		RouteSpecifier: &hcm.HttpConnectionManager_RouteConfig{
@@ -85,15 +86,17 @@ func (lb *ListenerBuilder) buildHCMConnectTerminateChain(routes []*route.Route) 
 				}},
 			},
 		},
-		// Append and forward client cert to backend.
-		ForwardClientCertDetails: hcm.HttpConnectionManager_APPEND_FORWARD,
+		// Append and forward client cert to backend, if configured
+		ForwardClientCertDetails: ph.ForwardedClientCert,
 		SetCurrentClientCertDetails: &hcm.HttpConnectionManager_SetCurrentClientCertDetails{
 			Subject: proto.BoolTrue,
 			Uri:     true,
 			Dns:     true,
 		},
-		ServerName:       EnvoyWaypoint,
-		UseRemoteAddress: proto.BoolFalse,
+		ServerName:                 ph.ServerName,
+		ServerHeaderTransformation: ph.ServerHeaderTransformation,
+		GenerateRequestId:          ph.GenerateRequestID,
+		UseRemoteAddress:           proto.BoolFalse,
 	}
 
 	// Protocol settings
@@ -110,9 +113,12 @@ func (lb *ListenerBuilder) buildHCMConnectTerminateChain(routes []*route.Route) 
 
 	// Filters needed to propagate the tunnel metadata to the inner streams.
 	h.HttpFilters = []*hcm.HttpFilter{
-		xdsfilters.ConnectBaggageFilter,
+		xdsfilters.WaypointDownstreamMetadataFilter,
 		xdsfilters.ConnectAuthorityFilter,
-		xdsfilters.Router,
+		xdsfilters.BuildRouterFilter(xdsfilters.RouterFilterContext{
+			StartChildSpan:       false,
+			SuppressDebugHeaders: ph.SuppressDebugHeaders,
+		}),
 	}
 	return []*listener.Filter{
 		xdsfilters.IstioNetworkAuthenticationFilterShared,
@@ -177,7 +183,7 @@ func (lb *ListenerBuilder) buildWaypointInternal(wls []*model.WorkloadInfo, svcs
 			portString := fmt.Sprintf("%d", port.Port)
 			cc := inboundChainConfig{
 				clusterName: model.BuildSubsetKey(model.TrafficDirectionInboundVIP, "tcp", svc.Hostname, port.Port),
-				port: ServiceInstancePort{
+				port: model.ServiceInstancePort{
 					ServicePort: port,
 					TargetPort:  uint32(port.Port),
 				},
@@ -229,7 +235,7 @@ func (lb *ListenerBuilder) buildWaypointInternal(wls []*model.WorkloadInfo, svcs
 		// Direct pod access chain.
 		cc := inboundChainConfig{
 			clusterName: EncapClusterName,
-			port: ServiceInstancePort{
+			port: model.ServiceInstancePort{
 				ServicePort: &model.Port{
 					Name:     "unknown",
 					Protocol: protocol.TCP,
@@ -305,17 +311,11 @@ func (lb *ListenerBuilder) buildWaypointInternal(wls []*model.WorkloadInfo, svcs
 }
 
 func buildWaypointConnectOriginateListener() *listener.Listener {
-	return buildConnectOriginateListener("")
+	return buildConnectOriginateListener()
 }
 
-func buildConnectOriginateListener(baggage string) *listener.Listener {
+func buildConnectOriginateListener() *listener.Listener {
 	var headers []*core.HeaderValueOption
-	if baggage != "" {
-		headers = append(headers, &core.HeaderValueOption{Header: &core.HeaderValue{
-			Key:   "baggage",
-			Value: baggage,
-		}})
-	}
 	l := &listener.Listener{
 		Name:              ConnectOriginate,
 		UseOriginalDst:    wrappers.Bool(false),
@@ -367,18 +367,22 @@ func (lb *ListenerBuilder) buildWaypointHTTPFilters() (pre []*hcm.HttpFilter, po
 // buildWaypointInboundHTTPFilters builds the network filters that should be inserted before an HCM.
 // This should only be used with HTTP; see buildInboundNetworkFilters for TCP
 func (lb *ListenerBuilder) buildWaypointInboundHTTPFilters(svc *model.Service, cc inboundChainConfig, pre, post []*hcm.HttpFilter) []*listener.Filter {
+	ph := GetProxyHeaders(lb.node, lb.push, istionetworking.ListenerClassSidecarInbound)
 	var filters []*listener.Filter
 	httpOpts := &httpListenerOpts{
 		routeConfig:      buildWaypointInboundHTTPRouteConfig(lb, svc, cc),
 		rds:              "", // no RDS for inbound traffic
 		useRemoteAddress: false,
 		connectionManager: &hcm.HttpConnectionManager{
-			ServerName: EnvoyServerName,
+			ServerName:                 ph.ServerName,
+			ServerHeaderTransformation: ph.ServerHeaderTransformation,
+			GenerateRequestId:          ph.GenerateRequestID,
 		},
-		protocol:   cc.port.Protocol,
-		class:      istionetworking.ListenerClassSidecarInbound,
-		statPrefix: cc.StatPrefix(),
-		isWaypoint: true,
+		suppressEnvoyDebugHeaders: ph.SuppressDebugHeaders,
+		protocol:                  cc.port.Protocol,
+		class:                     istionetworking.ListenerClassSidecarInbound,
+		statPrefix:                cc.StatPrefix(),
+		isWaypoint:                true,
 	}
 	// See https://github.com/grpc/grpc-web/tree/master/net/grpc/gateway/examples/helloworld#configure-the-proxy
 	if cc.port.Protocol.IsHTTP2() {
@@ -568,11 +572,14 @@ func (lb *ListenerBuilder) routeDestination(out *route.Route, in *networking.HTT
 
 	if in.Mirror != nil {
 		if mp := istio_route.MirrorPercent(in); mp != nil {
-			action.RequestMirrorPolicies = []*route.RouteAction_RequestMirrorPolicy{{
-				Cluster:         lb.GetDestinationCluster(in.Mirror, lb.serviceForHostname(host.Name(in.Mirror.Host)), listenerPort),
-				RuntimeFraction: mp,
-				TraceSampled:    &wrappers.BoolValue{Value: false},
-			}}
+			action.RequestMirrorPolicies = append(action.RequestMirrorPolicies,
+				istio_route.TranslateRequestMirrorPolicy(in.Mirror, lb.serviceForHostname(host.Name(in.Mirror.Host)), listenerPort, mp))
+		}
+	}
+	for _, mirror := range in.Mirrors {
+		if mp := istio_route.MirrorPercentByPolicy(mirror); mp != nil && mirror.Destination != nil {
+			action.RequestMirrorPolicies = append(action.RequestMirrorPolicies,
+				istio_route.TranslateRequestMirrorPolicy(mirror.Destination, lb.serviceForHostname(host.Name(mirror.Destination.Host)), listenerPort, mp))
 		}
 	}
 

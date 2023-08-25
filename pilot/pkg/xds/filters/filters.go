@@ -87,12 +87,6 @@ var (
 			TypedConfig: protoconv.MessageToAny(&fault.HTTPFault{}),
 		},
 	}
-	Router = &hcm.HttpFilter{
-		Name: wellknown.Router,
-		ConfigType: &hcm.HttpFilter_TypedConfig{
-			TypedConfig: protoconv.MessageToAny(&router.Router{}),
-		},
-	}
 	GrpcWeb = &hcm.HttpFilter{
 		Name: wellknown.GRPCWeb,
 		ConfigType: &hcm.HttpFilter_TypedConfig{
@@ -200,14 +194,14 @@ var (
 				}),
 		},
 	}
-	ConnectBaggageFilter = &hcm.HttpFilter{
-		Name: "connect_baggage",
+	WaypointDownstreamMetadataFilter = &hcm.HttpFilter{
+		Name: "waypoint_downstream_peer_metadata",
 		ConfigType: &hcm.HttpFilter_TypedConfig{
 			TypedConfig: protoconv.TypedStructWithFields("type.googleapis.com/io.istio.http.peer_metadata.Config",
 				map[string]any{
 					"downstream_discovery": []any{
 						map[string]any{
-							"baggage": map[string]any{},
+							"workload_discovery": map[string]any{},
 						},
 					},
 					"shared_with_upstream": true,
@@ -223,6 +217,50 @@ var (
 					"upstream_discovery": []any{
 						map[string]any{
 							"workload_discovery": map[string]any{},
+						},
+					},
+				}),
+		},
+	}
+
+	SidecarInboundMetadataFilter = &hcm.HttpFilter{
+		Name: MxFilterName,
+		ConfigType: &hcm.HttpFilter_TypedConfig{
+			TypedConfig: protoconv.TypedStructWithFields("type.googleapis.com/io.istio.http.peer_metadata.Config",
+				map[string]any{
+					"downstream_discovery": []any{
+						map[string]any{
+							"istio_headers": map[string]any{},
+						},
+						map[string]any{
+							"workload_discovery": map[string]any{},
+						},
+					},
+					"downstream_propagation": []any{
+						map[string]any{
+							"istio_headers": map[string]any{},
+						},
+					},
+				}),
+		},
+	}
+
+	SidecarOutboundMetadataFilter = &hcm.HttpFilter{
+		Name: MxFilterName,
+		ConfigType: &hcm.HttpFilter_TypedConfig{
+			TypedConfig: protoconv.TypedStructWithFields("type.googleapis.com/io.istio.http.peer_metadata.Config",
+				map[string]any{
+					"upstream_discovery": []any{
+						map[string]any{
+							"istio_headers": map[string]any{},
+						},
+						map[string]any{
+							"workload_discovery": map[string]any{},
+						},
+					},
+					"upstream_propagation": []any{
+						map[string]any{
+							"istio_headers": map[string]any{},
 						},
 					},
 				}),
@@ -262,19 +300,31 @@ var (
 	}
 )
 
-func BuildRouterFilter(ctx *RouterFilterContext) *hcm.HttpFilter {
-	if ctx == nil {
-		return Router
+// Router is used a bunch, so its worth precomputing even though we have a few options.
+// Since there are only 4 possible options, just precompute them all
+var routers = func() map[RouterFilterContext]*hcm.HttpFilter {
+	res := map[RouterFilterContext]*hcm.HttpFilter{}
+	for _, startSpan := range []bool{true, false} {
+		for _, supressHeaders := range []bool{true, false} {
+			res[RouterFilterContext{
+				StartChildSpan:       startSpan,
+				SuppressDebugHeaders: supressHeaders,
+			}] = &hcm.HttpFilter{
+				Name: wellknown.Router,
+				ConfigType: &hcm.HttpFilter_TypedConfig{
+					TypedConfig: protoconv.MessageToAny(&router.Router{
+						StartChildSpan:       startSpan,
+						SuppressEnvoyHeaders: supressHeaders,
+					}),
+				},
+			}
+		}
 	}
+	return res
+}()
 
-	return &hcm.HttpFilter{
-		Name: wellknown.Router,
-		ConfigType: &hcm.HttpFilter_TypedConfig{
-			TypedConfig: protoconv.MessageToAny(&router.Router{
-				StartChildSpan: ctx.StartChildSpan,
-			}),
-		},
-	}
+func BuildRouterFilter(ctx RouterFilterContext) *hcm.HttpFilter {
+	return routers[ctx]
 }
 
 var (

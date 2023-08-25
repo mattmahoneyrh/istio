@@ -37,7 +37,6 @@ import (
 	"istio.io/istio/pilot/pkg/networking"
 	authz_model "istio.io/istio/pilot/pkg/security/authz/model"
 	"istio.io/istio/pilot/pkg/util/protoconv"
-	xdsfilters "istio.io/istio/pilot/pkg/xds/filters"
 	"istio.io/istio/pilot/pkg/xds/requestidextension"
 	"istio.io/istio/pkg/bootstrap/platform"
 	"istio.io/istio/pkg/config/constants"
@@ -63,7 +62,7 @@ func configureTracing(
 	proxy *model.Proxy,
 	httpConnMgr *hcm.HttpConnectionManager,
 	class networking.ListenerClass,
-) (*xdsfilters.RouterFilterContext, *requestidextension.UUIDRequestIDExtensionContext) {
+) (bool, *requestidextension.UUIDRequestIDExtensionContext) {
 	tracing := push.Telemetry.Tracing(proxy)
 	return configureTracingFromTelemetry(tracing, push, proxy, httpConnMgr, class)
 }
@@ -74,14 +73,14 @@ func configureTracingFromTelemetry(
 	proxy *model.Proxy,
 	h *hcm.HttpConnectionManager,
 	class networking.ListenerClass,
-) (*xdsfilters.RouterFilterContext, *requestidextension.UUIDRequestIDExtensionContext) {
+) (bool, *requestidextension.UUIDRequestIDExtensionContext) {
 	proxyCfg := proxy.Metadata.ProxyConfigOrDefault(push.Mesh.DefaultConfig)
 	// If there is no telemetry config defined, fallback to legacy mesh config.
 	if tracing == nil {
 		meshCfg := push.Mesh
 		if !meshCfg.EnableTracing {
 			log.Debug("No valid tracing configuration found")
-			return nil, nil
+			return false, nil
 		}
 		// use the prior configuration bits of sampling and custom tags
 		h.Tracing = &hcm.HttpConnectionManager_Tracing{}
@@ -90,7 +89,7 @@ func configureTracingFromTelemetry(
 		if proxyCfg.GetTracing().GetMaxPathTagLength() != 0 {
 			h.Tracing.MaxPathTagLength = wrapperspb.UInt32(proxyCfg.GetTracing().MaxPathTagLength)
 		}
-		return nil, nil
+		return false, nil
 	}
 	spec := tracing.ServerSpec
 	if class == networking.ListenerClassSidecarOutbound || class == networking.ListenerClassGateway {
@@ -98,18 +97,18 @@ func configureTracingFromTelemetry(
 	}
 
 	if spec.Disabled {
-		return nil, nil
+		return false, nil
 	}
 
-	var routerFilterCtx *xdsfilters.RouterFilterContext
+	var startChildSpan bool
 	if spec.Provider != nil {
-		tcfg, rfCtx, err := configureFromProviderConfig(push, proxy, spec.Provider)
+		tcfg, child, err := configureFromProviderConfig(push, proxy, spec.Provider)
 		if err != nil {
 			log.Warnf("Not able to configure requested tracing provider %q: %v", spec.Provider.Name, err)
-			return nil, nil
+			return false, nil
 		}
 		h.Tracing = tcfg
-		routerFilterCtx = rfCtx
+		startChildSpan = child
 	} else {
 		// TODO: should this `return nil, nil` instead ?
 		log.Warnf("Not able to configure tracing provider. Provider lookup failed.")
@@ -130,13 +129,18 @@ func configureTracingFromTelemetry(
 
 	reqIDExtension := &requestidextension.UUIDRequestIDExtensionContext{}
 	reqIDExtension.UseRequestIDForTraceSampling = spec.UseRequestIDForTraceSampling
-	return routerFilterCtx, reqIDExtension
+	return startChildSpan, reqIDExtension
 }
+
+// configureFromProviderConfigHandled contains the number of providers we handle below.
+// This is to ensure this stays in sync as new handlers are added
+// STOP. DO NOT UPDATE THIS WITHOUT UPDATING configureFromProviderConfig.
+const configureFromProviderConfigHandled = 14
 
 func configureFromProviderConfig(pushCtx *model.PushContext, proxy *model.Proxy,
 	providerCfg *meshconfig.MeshConfig_ExtensionProvider,
-) (*hcm.HttpConnectionManager_Tracing, *xdsfilters.RouterFilterContext, error) {
-	var rfCtx *xdsfilters.RouterFilterContext
+) (*hcm.HttpConnectionManager_Tracing, bool, error) {
+	startChildSpan := false
 	var serviceCluster string
 	var maxTagLength uint32
 	var providerConfig typedConfigGenFn
@@ -198,9 +202,7 @@ func configureFromProviderConfig(pushCtx *model.PushContext, proxy *model.Proxy,
 			return skywalkingConfig(clusterName, hostname)
 		}
 
-		rfCtx = &xdsfilters.RouterFilterContext{
-			StartChildSpan: true,
-		}
+		startChildSpan = true
 	case *meshconfig.MeshConfig_ExtensionProvider_Stackdriver:
 		maxTagLength = provider.Stackdriver.GetMaxTagLength()
 		providerName = envoyOpenCensus
@@ -218,10 +220,22 @@ func configureFromProviderConfig(pushCtx *model.PushContext, proxy *model.Proxy,
 			}
 			return otelConfig(serviceCluster, hostname, clusterName)
 		}
-
+		// Providers without any tracing support
+		// Explicitly list to be clear what does and does not support tracing
+	case *meshconfig.MeshConfig_ExtensionProvider_EnvoyExtAuthzHttp,
+		*meshconfig.MeshConfig_ExtensionProvider_EnvoyExtAuthzGrpc,
+		*meshconfig.MeshConfig_ExtensionProvider_EnvoyHttpAls,
+		*meshconfig.MeshConfig_ExtensionProvider_EnvoyTcpAls,
+		*meshconfig.MeshConfig_ExtensionProvider_EnvoyOtelAls,
+		*meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLog,
+		*meshconfig.MeshConfig_ExtensionProvider_Prometheus:
+		return nil, false, fmt.Errorf("provider %T does not support tracing", provider)
+		// Should enver happen, but just in case we forget to add one
+	default:
+		return nil, false, fmt.Errorf("provider %T does not support tracing", provider)
 	}
 	tracing, err := buildHCMTracing(providerName, maxTagLength, providerConfig)
-	return tracing, rfCtx, err
+	return tracing, startChildSpan, err
 }
 
 func zipkinConfig(hostname, cluster string, enable128BitTraceID bool) (*anypb.Any, error) {
@@ -464,13 +478,11 @@ func dryRunPolicyTraceTag(name, key string) *tracing.CustomTag {
 	}
 }
 
-func buildOptionalPolicyTags() []*tracing.CustomTag {
-	return []*tracing.CustomTag{
-		dryRunPolicyTraceTag("istio.authorization.dry_run.allow_policy.name", authz_model.RBACShadowRulesAllowStatPrefix+authz_model.RBACShadowEffectivePolicyID),
-		dryRunPolicyTraceTag("istio.authorization.dry_run.allow_policy.result", authz_model.RBACShadowRulesAllowStatPrefix+authz_model.RBACShadowEngineResult),
-		dryRunPolicyTraceTag("istio.authorization.dry_run.deny_policy.name", authz_model.RBACShadowRulesDenyStatPrefix+authz_model.RBACShadowEffectivePolicyID),
-		dryRunPolicyTraceTag("istio.authorization.dry_run.deny_policy.result", authz_model.RBACShadowRulesDenyStatPrefix+authz_model.RBACShadowEngineResult),
-	}
+var optionalPolicyTags = []*tracing.CustomTag{
+	dryRunPolicyTraceTag("istio.authorization.dry_run.allow_policy.name", authz_model.RBACShadowRulesAllowStatPrefix+authz_model.RBACShadowEffectivePolicyID),
+	dryRunPolicyTraceTag("istio.authorization.dry_run.allow_policy.result", authz_model.RBACShadowRulesAllowStatPrefix+authz_model.RBACShadowEngineResult),
+	dryRunPolicyTraceTag("istio.authorization.dry_run.deny_policy.name", authz_model.RBACShadowRulesDenyStatPrefix+authz_model.RBACShadowEffectivePolicyID),
+	dryRunPolicyTraceTag("istio.authorization.dry_run.deny_policy.result", authz_model.RBACShadowRulesDenyStatPrefix+authz_model.RBACShadowEngineResult),
 }
 
 func buildServiceTags(metadata *model.NodeMetadata, labels map[string]string) []*tracing.CustomTag {
@@ -558,8 +570,7 @@ func proxyConfigSamplingValue(config *meshconfig.ProxyConfig) float64 {
 func configureCustomTags(hcmTracing *hcm.HttpConnectionManager_Tracing,
 	providerTags map[string]*telemetrypb.Tracing_CustomTag, proxyCfg *meshconfig.ProxyConfig, node *model.Proxy,
 ) {
-	tags := buildOptionalPolicyTags()
-	tags = append(tags, buildServiceTags(node.Metadata, node.Labels)...)
+	tags := append(buildServiceTags(node.Metadata, node.Labels), optionalPolicyTags...)
 
 	if len(providerTags) == 0 {
 		tags = append(tags, buildCustomTagsFromProxyConfig(proxyCfg.GetTracing().GetCustomTags())...)

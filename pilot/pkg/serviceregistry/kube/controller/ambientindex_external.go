@@ -106,7 +106,7 @@ func (a *AmbientIndexImpl) handleServiceEntry(svcEntry *apiv1alpha3.ServiceEntry
 			for _, networkAddr := range networkAddressFromWorkload(wl) {
 				a.byWorkloadEntry[networkAddr] = wl
 			}
-			a.byUID[c.generateServiceEntryUID(svcEntry.GetNamespace(), svcEntry.GetName(), w.Spec.GetAddress())] = wl
+			a.byUID[c.generateWorkloadEntryUID(wl.GetNamespace(), wl.GetName())] = wl
 			updates.Insert(model.ConfigKey{Kind: kind.Address, Name: wl.ResourceName()})
 			wls[wl.Uid] = wl
 		}
@@ -247,9 +247,10 @@ func (a *AmbientIndexImpl) extractWorkloadEntrySpec(w *v1alpha3.WorkloadEntry, n
 // NOTE: Mutex is locked prior to being called.
 func (a *AmbientIndexImpl) handleWorkloadEntry(oldWorkloadEntry, w *apiv1alpha3.WorkloadEntry, isDelete bool, c *Controller) sets.Set[model.ConfigKey] {
 	if oldWorkloadEntry != nil {
-		// compare only labels and annotations, which are what we care about
-		if maps.Equal(oldWorkloadEntry.Labels, w.Labels) &&
-			maps.Equal(oldWorkloadEntry.Annotations, w.Annotations) {
+		// compare only labels, annotations, and spec; which are what we care about
+		if proto.Equal(&oldWorkloadEntry.Spec, &w.Spec) &&
+			maps.Equal(oldWorkloadEntry.Annotations, w.Annotations) &&
+			maps.Equal(oldWorkloadEntry.Labels, w.Labels) {
 			return nil
 		}
 	}

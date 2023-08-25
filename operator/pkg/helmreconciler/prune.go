@@ -78,17 +78,11 @@ func NamespacedResources(version *version.Info) []schema.GroupVersionKind {
 		{Group: "apps", Version: "v1", Kind: name.DaemonSetStr},
 		{Group: "", Version: "v1", Kind: name.ServiceStr},
 		{Group: "", Version: "v1", Kind: name.CMStr},
-		{Group: "", Version: "v1", Kind: name.PVCStr},
 		{Group: "", Version: "v1", Kind: name.PodStr},
 		{Group: "", Version: "v1", Kind: name.SecretStr},
 		{Group: "", Version: "v1", Kind: name.SAStr},
 		{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: name.RoleBindingStr},
 		{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: name.RoleStr},
-		{Group: name.NetworkingAPIGroupName, Version: "v1alpha3", Kind: name.DestinationRuleStr},
-		{Group: name.NetworkingAPIGroupName, Version: "v1alpha3", Kind: name.EnvoyFilterStr},
-		{Group: name.NetworkingAPIGroupName, Version: "v1alpha3", Kind: name.GatewayStr},
-		{Group: name.NetworkingAPIGroupName, Version: "v1alpha3", Kind: name.VirtualServiceStr},
-		{Group: name.SecurityAPIGroupName, Version: "v1beta1", Kind: name.PeerAuthenticationStr},
 	}
 	// autoscaling v2 API is available on >=1.23
 	if kube.IsKubeAtLeastOrLessThanVersion(version, autoscalingV2MinK8SVersion, true) {
@@ -144,7 +138,7 @@ func (h *HelmReconciler) PruneControlPlaneByRevisionWithController(iopSpec *v1al
 			fmt.Errorf("failed to get enabled components: %v", err)
 	}
 	pilotEnabled := false
-	// check wherther the istiod is enabled
+	// check whether the istiod is enabled
 	for _, c := range enabledComponents {
 		if c == string(name.PilotComponentName) {
 			pilotEnabled = true

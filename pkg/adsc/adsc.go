@@ -210,9 +210,6 @@ type ADSC struct {
 	// restarts.
 	LocalCacheDir string
 
-	// RecvWg is for letting goroutines know when the goroutine handling the ADS stream finishes.
-	RecvWg sync.WaitGroup
-
 	cfg *Config
 
 	// sendNodeMeta is set to true if the connection is new - and we need to send node meta.,
@@ -274,7 +271,6 @@ func New(discoveryAddr string, opts *Config) (*ADSC, error) {
 		VersionInfo: map[string]string{},
 		url:         discoveryAddr,
 		Received:    map[string]*discovery.DiscoveryResponse{},
-		RecvWg:      sync.WaitGroup{},
 		cfg:         opts,
 		sync:        map[string]time.Time{},
 		errChan:     make(chan error, 10),
@@ -441,10 +437,6 @@ func (a *ADSC) Run() error {
 		}
 		_ = a.Send(r)
 	}
-	// by default, we assume 1 goroutine decrements the waitgroup (go a.handleRecv()).
-	// for synchronizing when the goroutine finishes reading from the gRPC stream.
-
-	a.RecvWg.Add(1)
 
 	go a.handleRecv()
 	return nil
@@ -483,20 +475,21 @@ func (a *ADSC) reconnect() {
 	a.mutex.RUnlock()
 
 	err := a.Run()
-	if err == nil {
-		a.cfg.BackoffPolicy.Reset()
-	} else {
+	if err != nil {
 		// TODO: fix reconnect
 		time.AfterFunc(a.cfg.BackoffPolicy.NextBackOff(), a.reconnect)
 	}
 }
 
 func (a *ADSC) handleRecv() {
+	// We connected, so reset the backoff
+	if a.cfg.BackoffPolicy != nil {
+		a.cfg.BackoffPolicy.Reset()
+	}
 	for {
 		var err error
 		msg, err := a.stream.Recv()
 		if err != nil {
-			a.RecvWg.Done()
 			adscLog.Infof("Connection closed for node %v with err: %v", a.nodeID, err)
 			select {
 			case a.errChan <- err:

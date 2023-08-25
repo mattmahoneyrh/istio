@@ -44,7 +44,10 @@ import (
 
 var supportedFilters = []*hcm.HttpFilter{
 	xdsfilters.Fault,
-	xdsfilters.Router,
+	xdsfilters.BuildRouterFilter(xdsfilters.RouterFilterContext{
+		StartChildSpan:       false,
+		SuppressDebugHeaders: false, // No need to set this to true, gRPC doesn't respect it anyways
+	}),
 }
 
 const (
@@ -73,9 +76,9 @@ func buildInboundListeners(node *model.Proxy, push *model.PushContext, names []s
 	}
 	var out model.Resources
 	mtlsPolicy := factory.NewMtlsPolicy(push, node.Metadata.Namespace, node.Labels)
-	serviceInstancesByPort := map[uint32]*model.ServiceInstance{}
-	for _, si := range node.ServiceInstances {
-		serviceInstancesByPort[si.Endpoint.EndpointPort] = si
+	serviceInstancesByPort := map[uint32]model.ServiceTarget{}
+	for _, si := range node.ServiceTargets {
+		serviceInstancesByPort[si.Port.TargetPort] = si
 	}
 
 	for _, name := range names {
@@ -114,7 +117,7 @@ func buildInboundListeners(node *model.Proxy, push *model.PushContext, names []s
 		// add extra addresses for the listener
 		extrAddresses := si.Service.GetExtraAddressesForProxy(node)
 		if len(extrAddresses) > 0 {
-			ll.AdditionalAddresses = util.BuildAdditionalAddresses(extrAddresses, uint32(listenPort), node)
+			ll.AdditionalAddresses = util.BuildAdditionalAddresses(extrAddresses, uint32(listenPort))
 		}
 
 		out = append(out, &discovery.Resource{
@@ -126,8 +129,8 @@ func buildInboundListeners(node *model.Proxy, push *model.PushContext, names []s
 }
 
 // nolint: unparam
-func buildInboundFilterChains(node *model.Proxy, push *model.PushContext, si *model.ServiceInstance, checker authn.MtlsPolicy) []*listener.FilterChain {
-	mode := checker.GetMutualTLSModeForPort(si.Endpoint.EndpointPort)
+func buildInboundFilterChains(node *model.Proxy, push *model.PushContext, si model.ServiceTarget, checker authn.MtlsPolicy) []*listener.FilterChain {
+	mode := checker.GetMutualTLSModeForPort(si.Port.TargetPort)
 
 	// auto-mtls label is set - clients will attempt to connect using mtls, and
 	// gRPC doesn't support permissive.
@@ -201,7 +204,10 @@ func buildInboundFilterChain(node *model.Proxy, push *model.PushContext, nameSuf
 	}
 
 	// Must be last
-	fc = append(fc, xdsfilters.Router)
+	fc = append(fc, xdsfilters.BuildRouterFilter(xdsfilters.RouterFilterContext{
+		StartChildSpan:       false,
+		SuppressDebugHeaders: false, // No need to set this to true, gRPC doesn't respect it anyways
+	}))
 
 	out := &listener.FilterChain{
 		Name:             "inbound-" + nameSuffix,
@@ -325,7 +331,7 @@ func buildOutboundListeners(node *model.Proxy, push *model.PushContext, filter l
 				// add extra addresses for the listener
 				extrAddresses := sv.GetExtraAddressesForProxy(node)
 				if len(extrAddresses) > 0 {
-					ll.AdditionalAddresses = util.BuildAdditionalAddresses(extrAddresses, uint32(p.Port), node)
+					ll.AdditionalAddresses = util.BuildAdditionalAddresses(extrAddresses, uint32(p.Port))
 				}
 
 				out = append(out, &discovery.Resource{

@@ -129,6 +129,16 @@
         "loadBalancerSourceRanges": {
           "type": "array"
         },
+        "ipFamilies" : {
+          "items": {
+            "type": "string",
+            "enum": ["IPv4", "IPv6"]
+        }
+        },
+        "ipFamilyPolicy" : {
+          "type": "string",
+          "enum": ["", "SingleStack", "PreferDualStack", "RequireDualStack"]
+        },
         "ports": {
           "type": "array",
           "items": {
@@ -217,6 +227,18 @@
     },
     "terminationGracePeriodSeconds": {
       "type": "number"
+    },
+    "volumes": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "volumeMounts": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
     }
   }
 }
